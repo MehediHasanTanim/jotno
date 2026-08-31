@@ -2,7 +2,7 @@
 title: 'Story 1.1 — A database that proves it is encrypted'
 type: 'feature'
 created: '2026-08-31'
-status: 'in-review'
+status: 'done'
 baseline_commit: 'b01ccc4fbcd642102dd9490848f06b26db1bd585'
 review_loop_iteration: 0
 context:
@@ -124,3 +124,57 @@ Ordering is mandatory: cipher configuration, then `PRAGMA key`, then everything 
 
 **Manual checks:**
 - Temporarily remove the `hooks:` block, rebuild in release, launch: the app must refuse to start with the cipher error. Restore the block afterwards. This is the only check that exercises the failure this story exists to prevent.
+
+## Suggested Review Order
+
+**The fail-closed guarantee — start here**
+
+- Four statements in a mandatory order; everything else in this story serves them.
+  [`connection.dart:111`](../../jotno/lib/core/database/connection.dart#L111)
+
+- Upstream SQLite answers an unknown pragma with an empty result set, not an error — so emptiness is the test, and it throws rather than asserts.
+  [`connection.dart:99`](../../jotno/lib/core/database/connection.dart#L99)
+
+- An empty key leaves SQLite3MultipleCiphers unencrypted. Guarded before the pragma runs.
+  [`connection.dart:118`](../../jotno/lib/core/database/connection.dart#L118)
+
+- Only SQLITE_NOTADB means "wrong key". Busy, locked and corrupt propagate untouched so the user sees the right remedy.
+  [`connection.dart:142`](../../jotno/lib/core/database/connection.dart#L142)
+
+**Keeping the key out of everything**
+
+- The pragma inlines the key, so SqliteException carries it — only the result code survives.
+  [`connection.dart:125`](../../jotno/lib/core/database/connection.dart#L125)
+
+- Failures classify by named type into fixed text; no error object ever reaches the UI.
+  [`main.dart:70`](../../jotno/lib/main.dart#L70)
+
+- A release binary with a compiled-in key cannot start. A TODO is not a gate.
+  [`database_key.dart:58`](../../jotno/lib/core/database/database_key.dart#L58)
+
+**The bug all three reviewers found**
+
+- The header lives once, as bytes. A trailing space instead of NUL made the on-device assertion vacuous.
+  [`sqlite_file_format.dart:10`](../../jotno/lib/core/database/sqlite_file_format.dart#L10)
+
+- Length is checked before comparison, so a truncated read cannot pass for free.
+  [`sqlite_file_format.dart:34`](../../jotno/lib/core/database/sqlite_file_format.dart#L34)
+
+**Isolate and filesystem seams**
+
+- The cipher and key are proven on the calling isolate, so startup sees both failures as thrown rather than wrapped.
+  [`connection.dart:175`](../../jotno/lib/core/database/connection.dart#L175)
+
+- drift_flutter used to set this; dropping the wrapper would have silently lost it on large queries.
+  [`connection.dart:196`](../../jotno/lib/core/database/connection.dart#L196)
+
+**Supporting**
+
+- 57 host tests, including one proving an empty key really does produce a plaintext file.
+  [`encryption_test.dart:1`](../../jotno/test/core/database/encryption_test.dart#L1)
+
+- The failure classification is the user-visible form of the story's central distinction.
+  [`startup_surface_test.dart:1`](../../jotno/test/startup_surface_test.dart#L1)
+
+- The encryption switch itself — four lines of YAML, no hook file to author.
+  [`pubspec.yaml:1`](../../jotno/pubspec.yaml#L1)
