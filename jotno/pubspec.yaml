@@ -1,0 +1,50 @@
+name: jotno
+description: "Jotno — a family health record that never leaves the device."
+# Private package: never publish to pub.dev.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.2
+
+# ---------------------------------------------------------------------------
+# THE ENCRYPTION SWITCH.
+#
+# This block is the entire encryption configuration. It tells `package:sqlite3`
+# to build and bundle SQLite3MultipleCiphers instead of upstream SQLite.
+# `package:sqlite3` ships its own build hook; there is no hook/build.dart here.
+#
+# Removing or changing `source: sqlite3mc` ships an UNENCRYPTED database.
+# `lib/core/database/connection.dart` throws at startup if that happens, in
+# release as well as debug — see `requireEncryptedSqlite`.
+#
+# Note: `hooks: user_defines:` applies to the whole pub workspace, not to a
+# single package. Relevant if this repo ever becomes a workspace.
+# ---------------------------------------------------------------------------
+hooks:
+  user_defines:
+    sqlite3:
+      source: sqlite3mc
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  drift: ^2.34.2
+  path_provider: ^2.1.6
+  sqlite3: ^3.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+
+  build_runner: ^2.15.2
+  drift_dev: ^2.34.5
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

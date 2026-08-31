@@ -1,0 +1,84 @@
+# Jotno CI.
+#
+# Lives at the repository root because GitHub only discovers workflows under
+# `<repo-root>/.github/workflows/`. The Flutter project sits in `jotno/`, so
+# every step runs from there via the `working-directory` default below.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: jotno
+
+jobs:
+  verify:
+    name: analyze, test, migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.2
+          channel: stable
+
+      # ---------------------------------------------------------------------
+      # The encryption gate. These two steps are the reason this workflow
+      # exists: a build that quietly loses the cipher looks perfectly healthy
+      # until someone pulls the database file off a device.
+      # ---------------------------------------------------------------------
+      - name: The encryption switch is present
+        run: |
+          if ! grep -A3 '^hooks:' pubspec.yaml | grep -qx '      source: sqlite3mc'; then
+            echo "::error::pubspec.yaml must set hooks.user_defines.sqlite3.source to 'sqlite3mc'. Without it the app ships upstream SQLite and writes plaintext."
+            exit 1
+          fi
+
+      - name: Forbidden packages are absent
+        # Discontinued or banned by the architecture (AD-2). `pubspec.lock` is
+        # in scope deliberately: these must be absent from the resolved
+        # dependency tree, not merely unimported. That is why the database
+        # opens through `package:drift` directly instead of the `drift_flutter`
+        # wrapper, which drags both `*_flutter_libs` packages in as end-of-life
+        # markers.
+        run: |
+          if grep -R -n -E 'sqlcipher_flutter_libs|sqlite3_flutter_libs|riverpod_generator|drift_flutter' \
+               pubspec.yaml pubspec.lock build.yaml lib test integration_test android ios; then
+            echo "::error::A forbidden package is referenced above."
+            exit 1
+          fi
+
+      - run: flutter pub get
+
+      - name: Generated sources are up to date
+        run: |
+          dart run build_runner build
+          git diff --exit-code -- lib
+
+      - run: flutter analyze --fatal-infos
+
+      - run: flutter test
+
+      # Hand-written migrations are not permitted. Regenerating must be a no-op;
+      # if it is not, someone changed the schema without running the tool.
+      #
+      # At schema v1 there is nothing to migrate *from*, so `make-migrations`
+      # emits only `drift_schemas/app_database/drift_schema_v1.json`. From v2
+      # onwards it also emits `*.steps.dart` and the tests under
+      # `test/migration/`, which the `flutter test` step above then runs.
+      - name: Migration schemas are up to date
+        run: |
+          dart run drift_dev make-migrations
+          git diff --exit-code -- drift_schemas test/migration
+
+      - name: Migration tests
+        run: |
+          if [ -n "$(find test/migration -name '*_test.dart' -print -quit)" ]; then
+            flutter test test/migration
+          else
+            echo "No migration tests yet — expected at schema v1."
+          fi
