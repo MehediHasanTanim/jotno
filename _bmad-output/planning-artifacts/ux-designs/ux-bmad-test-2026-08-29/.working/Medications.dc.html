@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;500;600;700&family=Noto+Sans:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; font-family: 'Noto Sans Bengali', 'Noto Sans', system-ui, sans-serif; }
+    a { color: #2C6355; } a:hover { color: #1F4A3F; }
+  </style>
+</helmet>
+
+<div style="width: 390px; height: 844px; background: #F7F9F8; display: flex; flex-direction: column; color: #14201C; box-sizing: border-box;">
+
+  <div style="padding: 56px 20px 14px; background: #FFFFFF; border-bottom: 1px solid #E2E8E5; display: flex; flex-direction: column; gap: 12px;">
+    <div style="display: flex; justify-content: space-between; align-items: baseline;">
+      <div style="font-size: 24px; font-weight: 600; line-height: 1.4;">আজকের ওষুধ</div>
+      <div style="font-size: 13px; color: #8A9691;">{{doneCount}}/{{totalCount}}</div>
+    </div>
+    <div style="height: 4px; background: #EDF1EF; border-radius: 2px; overflow: hidden;">
+      <div style="height: 4px; background: #2C6355; border-radius: 2px; width: {{progressWidth}};"></div>
+    </div>
+  </div>
+
+  <div style="flex-grow: 1; overflow: hidden; padding: 16px 20px; display: flex; flex-direction: column; gap: 16px;">
+
+    <sc-if value="{{hasMissed}}" hint-placeholder-val="{{ true }}">
+      <div style="background: #FBF0E2; border-radius: 8px; padding: 13px 14px; display: flex; gap: 11px; align-items: flex-start;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#A8600B" stroke-width="2" stroke-linecap="round" style="flex-shrink: 0; margin-top: 2px;"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+          <div style="font-size: 14px; font-weight: 600; color: #A8600B; line-height: 1.5;">গতকালের ১টি ডোজ মিস হয়েছে</div>
+          <div style="font-size: 13px; color: #A8600B; line-height: 1.6; opacity: 0.85;">বাবা · লোসারটান ৫০mg · রাত ৮:০০</div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <div style="font-size: 13px; font-weight: 600; color: #5A6B65; font-variant-numeric: tabular-nums;">{{g.time}}</div>
+          <div style="flex-grow: 1; height: 1px; background: #E2E8E5;"></div>
+        </div>
+
+        <sc-for list="{{g.doses}}" as="d" hint-placeholder-count="2">
+          <div style="background: #FFFFFF; border: 1px solid {{d.borderColor}}; border-radius: 8px; padding: 13px 14px; display: flex; flex-direction: column; gap: 11px;">
+
+            <div style="display: flex; gap: 11px; align-items: flex-start;">
+              <div style="width: 34px; height: 34px; border-radius: 17px; background: #E8F0ED; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: #1F4A3F; flex-shrink: 0;">{{d.initial}}</div>
+              <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+                <div style="font-size: 16px; font-weight: 600; line-height: 1.45;">{{d.medicine}}</div>
+                <div style="font-size: 13px; color: #5A6B65; line-height: 1.6;">{{d.who}} · {{d.dose}} · {{d.note}}</div>
+              </div>
+              <sc-if value="{{d.settled}}" hint-placeholder-val="{{ false }}">
+                <div style="background: {{d.chipBg}}; color: {{d.chipFg}}; padding: 4px 9px; border-radius: 4px; font-size: 12px; font-weight: 600; flex-shrink: 0;">{{d.chipLabel}}</div>
+              </sc-if>
+            </div>
+
+            <sc-if value="{{d.pending}}" hint-placeholder-val="{{ true }}">
+              <div style="display: flex; gap: 8px;">
+                <div onClick="{{d.take}}" style="flex-grow: 1; background: #2C6355; color: #FFFFFF; height: 46px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 15px; font-weight: 600; cursor: pointer;">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                  নিয়েছি
+                </div>
+                <div onClick="{{d.snooze}}" style="width: 46px; height: 46px; border: 1px solid #E2E8E5; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; background: #FFFFFF;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5A6B65" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m19 3 3 3"/></svg>
+                </div>
+                <div onClick="{{d.skip}}" style="width: 46px; height: 46px; border: 1px solid #E2E8E5; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; background: #FFFFFF;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5A6B65" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </div>
+              </div>
+            </sc-if>
+
+          </div>
+        </sc-for>
+      </div>
+    </sc-for>
+
+  </div>
+
+  <div style="background: #FFFFFF; border-top: 1px solid #E2E8E5; padding: 10px 8px 24px; display: flex; justify-content: space-around; align-items: flex-start;">
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8A9691" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/></svg>
+      <div style="font-size: 11px; color: #8A9691;">হোম</div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8A9691" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg>
+      <div style="font-size: 11px; color: #8A9691;">টাইমলাইন</div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2C6355" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10.5 20.5 10-10a5 5 0 0 0-7-7l-10 10a5 5 0 0 0 7 7Z"/><path d="m8.5 8.5 7 7"/></svg>
+      <div style="font-size: 11px; color: #2C6355; font-weight: 600;">ওষুধ</div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8A9691" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M3 11h18"/></svg>
+      <div style="font-size: 11px; color: #8A9691;">ক্যালেন্ডার</div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8A9691" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+      <div style="font-size: 11px; color: #8A9691;">আরও</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { status: {} };
+  }
+
+  renderVals() {
+    const raw = [
+      { time: 'সকাল ৮:০০', doses: [
+        { id: 'a', medicine: 'মেটফরমিন ৫০০mg', who: 'বাবা', initial: 'বা', dose: '১টি ট্যাবলেট', note: 'খাবারের পরে' },
+        { id: 'b', medicine: 'লোসারটান ৫০mg', who: 'বাবা', initial: 'বা', dose: '১টি ট্যাবলেট', note: 'খালি পেটে' },
+      ]},
+      { time: 'দুপুর ২:০০', doses: [
+        { id: 'c', medicine: 'নাপা ৫০০mg', who: 'আরিয়ান', initial: 'আ', dose: '৫ml সিরাপ', note: 'জ্বর হলে' },
+      ]},
+      { time: 'রাত ৮:০০', doses: [
+        { id: 'd', medicine: 'মেটফরমিন ৫০০mg', who: 'বাবা', initial: 'বা', dose: '১টি ট্যাবলেট', note: 'খাবারের পরে' },
+        { id: 'e', medicine: 'অ্যামলোডিপিন ৫mg', who: 'মা', initial: 'মা', dose: '১টি ট্যাবলেট', note: 'ঘুমানোর আগে' },
+      ]},
+    ];
+
+    const chip = {
+      taken:   { chipLabel: 'নেওয়া হয়েছে', chipBg: '#E8F0ED', chipFg: '#1F4A3F', borderColor: '#CFE0D9' },
+      skipped: { chipLabel: 'বাদ',          chipBg: '#F1F4F3', chipFg: '#5A6B65', borderColor: '#E2E8E5' },
+      snoozed: { chipLabel: '১৫ মিনিট পরে', chipBg: '#FBF0E2', chipFg: '#A8600B', borderColor: '#EFDFC4' },
+    };
+
+    let done = 0;
+    let total = 0;
+
+    const groups = raw.map((g) => ({
+      time: g.time,
+      doses: g.doses.map((d) => {
+        total += 1;
+        const s = this.state.status[d.id];
+        if (s === 'taken' || s === 'skipped') done += 1;
+        const style = s ? chip[s] : { chipLabel: '', chipBg: '', chipFg: '', borderColor: '#E2E8E5' };
+        return {
+          ...d,
+          ...style,
+          settled: !!s,
+          pending: !s || s === 'snoozed',
+          take:   () => this.setState({ status: { ...this.state.status, [d.id]: 'taken' } }),
+          skip:   () => this.setState({ status: { ...this.state.status, [d.id]: 'skipped' } }),
+          snooze: () => this.setState({ status: { ...this.state.status, [d.id]: 'snoozed' } }),
+        };
+      }),
+    }));
+
+    const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+    const bn = (n) => String(n).replace(/[0-9]/g, (c) => '০১২৩৪৫৬৭৮৯'[Number(c)]);
+
+    return {
+      groups,
+      hasMissed: true,
+      doneCount: bn(done),
+      totalCount: bn(total),
+      progressWidth: pct + '%',
+    };
+  }
+}
+</script>
+</body>
+</html>

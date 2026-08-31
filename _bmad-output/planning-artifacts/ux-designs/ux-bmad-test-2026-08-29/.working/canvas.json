@@ -1,0 +1,377 @@
+{
+  "artboards": [
+    {
+      "file": "Foundations.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 880,
+      "h": 1140,
+      "title": "Foundations"
+    },
+    {
+      "file": "Onboarding.dc.html",
+      "x": 0,
+      "y": 1290,
+      "w": 390,
+      "h": 844,
+      "title": "First launch"
+    },
+    {
+      "file": "Disclaimer.dc.html",
+      "x": 470,
+      "y": 1290,
+      "w": 390,
+      "h": 844,
+      "title": "Medical disclaimer"
+    },
+    {
+      "file": "AdConsent.dc.html",
+      "x": 940,
+      "y": 1290,
+      "w": 390,
+      "h": 844,
+      "title": "Ad consent"
+    },
+    {
+      "file": "CreateFamily.dc.html",
+      "x": 1410,
+      "y": 1290,
+      "w": 390,
+      "h": 844,
+      "title": "Create family"
+    },
+    {
+      "file": "Permission.dc.html",
+      "x": 1880,
+      "y": 1290,
+      "w": 390,
+      "h": 844,
+      "title": "Notification permission"
+    },
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 2284,
+      "w": 390,
+      "h": 844,
+      "title": "Home"
+    },
+    {
+      "file": "Member.dc.html",
+      "x": 470,
+      "y": 2284,
+      "w": 390,
+      "h": 844,
+      "title": "Member"
+    },
+    {
+      "file": "Timeline.dc.html",
+      "x": 940,
+      "y": 2284,
+      "w": 390,
+      "h": 844,
+      "title": "Timeline"
+    },
+    {
+      "file": "Calendar.dc.html",
+      "x": 1410,
+      "y": 2284,
+      "w": 390,
+      "h": 844,
+      "title": "Calendar"
+    },
+    {
+      "file": "More.dc.html",
+      "x": 1880,
+      "y": 2284,
+      "w": 390,
+      "h": 844,
+      "title": "More"
+    },
+    {
+      "file": "AddMember.dc.html",
+      "x": 2350,
+      "y": 2284,
+      "w": 390,
+      "h": 844,
+      "title": "Add member"
+    },
+    {
+      "file": "Medications.dc.html",
+      "x": 0,
+      "y": 3278,
+      "w": 390,
+      "h": 844,
+      "title": "Medications · interactive"
+    },
+    {
+      "file": "MedicationDetail.dc.html",
+      "x": 470,
+      "y": 3278,
+      "w": 390,
+      "h": 844,
+      "title": "Medication detail"
+    },
+    {
+      "file": "AddMedication.dc.html",
+      "x": 940,
+      "y": 3278,
+      "w": 390,
+      "h": 844,
+      "title": "Add medication"
+    },
+    {
+      "file": "Appointments.dc.html",
+      "x": 1410,
+      "y": 3278,
+      "w": 390,
+      "h": 844,
+      "title": "Appointments"
+    },
+    {
+      "file": "AddAppointment.dc.html",
+      "x": 1880,
+      "y": 3278,
+      "w": 390,
+      "h": 844,
+      "title": "Add appointment"
+    },
+    {
+      "file": "Reminders.dc.html",
+      "x": 2350,
+      "y": 3278,
+      "w": 390,
+      "h": 844,
+      "title": "Reminders"
+    },
+    {
+      "file": "Measurements.dc.html",
+      "x": 0,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "Measurements"
+    },
+    {
+      "file": "RecordBP.dc.html",
+      "x": 470,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "Record blood pressure"
+    },
+    {
+      "file": "LabReports.dc.html",
+      "x": 940,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "Lab reports"
+    },
+    {
+      "file": "Documents.dc.html",
+      "x": 1410,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "Documents"
+    },
+    {
+      "file": "Vaccinations.dc.html",
+      "x": 1880,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "Vaccinations"
+    },
+    {
+      "file": "Prescriptions.dc.html",
+      "x": 2350,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "Prescriptions"
+    },
+    {
+      "file": "MedicalHistory.dc.html",
+      "x": 2820,
+      "y": 4272,
+      "w": 390,
+      "h": 844,
+      "title": "History, conditions, allergies"
+    },
+    {
+      "file": "Emergency.dc.html",
+      "x": 0,
+      "y": 5266,
+      "w": 390,
+      "h": 844,
+      "title": "Emergency card"
+    },
+    {
+      "file": "EmergencyContacts.dc.html",
+      "x": 470,
+      "y": 5266,
+      "w": 390,
+      "h": 844,
+      "title": "Emergency contacts"
+    },
+    {
+      "file": "Doctors.dc.html",
+      "x": 940,
+      "y": 5266,
+      "w": 390,
+      "h": 844,
+      "title": "Doctors & hospitals"
+    },
+    {
+      "file": "AppLock.dc.html",
+      "x": 1410,
+      "y": 5266,
+      "w": 390,
+      "h": 844,
+      "title": "App lock"
+    },
+    {
+      "file": "Settings.dc.html",
+      "x": 0,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Settings"
+    },
+    {
+      "file": "BackupSync.dc.html",
+      "x": 470,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Backup & sync"
+    },
+    {
+      "file": "RecoveryPhrase.dc.html",
+      "x": 940,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Recovery phrase"
+    },
+    {
+      "file": "RestoreBackup.dc.html",
+      "x": 1410,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Restore"
+    },
+    {
+      "file": "ImportExport.dc.html",
+      "x": 1880,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Import & export"
+    },
+    {
+      "file": "HealthSummaryPDF.dc.html",
+      "x": 2350,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Health summary PDF"
+    },
+    {
+      "file": "Paywall.dc.html",
+      "x": 2820,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Private Backup purchase"
+    },
+    {
+      "file": "DeleteData.dc.html",
+      "x": 3290,
+      "y": 6260,
+      "w": 390,
+      "h": 844,
+      "title": "Delete all data"
+    },
+    {
+      "file": "AppIcon.dc.html",
+      "x": 0,
+      "y": 7254,
+      "w": 1180,
+      "h": 1080,
+      "title": "App icon — যত্ন"
+    },
+    {
+      "file": "AppIconSpec.dc.html",
+      "x": 1260,
+      "y": 7254,
+      "w": 1180,
+      "h": 900,
+      "title": "App icon — build spec"
+    }
+  ],
+  "annotations": [
+    {
+      "id": "band-0",
+      "x": -470,
+      "y": 0,
+      "w": 380,
+      "text": "FOUNDATIONS\n\nCalm and clinical. White ground, one deep green, hairline borders instead of shadows.\n\nSaturated colour is reserved for meaning — red for a severe allergy, amber for a missed dose.\n\nBangla is the default: body sets 15/26 against English 15/24, and every container is sized to the Bangla measure so switching languages never reflows."
+    },
+    {
+      "id": "band-1",
+      "x": -470,
+      "y": 1290,
+      "w": 380,
+      "text": "FIRST RUN\n\nThe promise leads, not the legal text.\n\nWelcome → disclaimer → ad consent → create family. Permissions come later, at first use — never here."
+    },
+    {
+      "id": "band-2",
+      "x": -470,
+      "y": 2284,
+      "w": 380,
+      "text": "CORE\n\nFive fixed tabs: Home, Timeline, Medications, Calendar, More.\n\nHome is the family, not one person — every other health app opens on an individual. Emergency sits on Home, one tap away."
+    },
+    {
+      "id": "band-3",
+      "x": -470,
+      "y": 3278,
+      "w": 380,
+      "text": "MEDICATIONS & VISITS\n\nThe Medications artboard is LIVE — tap নিয়েছি, snooze or skip and the card settles, the counter and progress bar move.\n\nThis is the loop that decides whether the app gets opened tomorrow."
+    },
+    {
+      "id": "band-4",
+      "x": -470,
+      "y": 4272,
+      "w": 380,
+      "text": "RECORDS\n\nJotno records; it does not interpret.\n\nLab values show their reference range, never coloured good or bad. Vaccination dates are user-entered — no schedule is recommended.\n\nOne prescription can produce several medications; the slip is scanned once."
+    },
+    {
+      "id": "band-5",
+      "x": -470,
+      "y": 5266,
+      "w": 380,
+      "text": "EMERGENCY\n\nRead by a stranger, under stress, on a locked phone.\n\nAllergy above blood group, blood group above medication. Every number dials on tap.\n\nApp lock exposes this and nothing else."
+    },
+    {
+      "id": "band-6",
+      "x": -470,
+      "y": 6260,
+      "w": 380,
+      "text": "DATA & PRIVACY\n\nThe privacy story has to survive its edge cases.\n\nSaving the recovery phrase beside the backup gets a warning. Deleting locally does not touch cloud backups, and says so. A corrupted backup is named, never hidden."
+    },
+    {
+      "id": "band-7",
+      "x": -470,
+      "y": 7254,
+      "w": 380,
+      "text": "APP ICON\n\nA heart built from two leaf lobes — যত্ন, care.\n\nThe lobes are leaf tips, not heart bumps. That is the whole difference between this and a wellness cliché.\n\nBelow 44px the side veins close into a smudge, so they drop and the stroke thickens. One icon, two drawings."
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

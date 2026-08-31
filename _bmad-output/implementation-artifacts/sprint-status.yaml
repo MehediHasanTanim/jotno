@@ -1,0 +1,123 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 08-31-2026 21:50
+last_updated: 08-31-2026 21:50
+project: Jotno
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-a-database-that-proves-it-is-encrypted: backlog
+  1-2-the-foundations-every-feature-is-required-to-use: backlog
+  1-3-the-app-speaks-bangla-first: backlog
+  1-4-a-design-system-the-whole-app-inherits: backlog
+  1-5-shared-components-that-carry-the-rules: backlog
+  1-6-first-launch-leads-with-the-promise: backlog
+  1-7-create-a-family: backlog
+  1-8-add-and-manage-family-members: backlog
+  1-9-record-conditions-and-allergies: backlog
+  1-10-record-medical-history: backlog
+  1-11-keep-a-directory-of-doctors-and-hospitals: backlog
+  1-12-see-a-member-s-health-at-a-glance: backlog
+  1-13-a-recovery-phrase-that-can-rebuild-the-key: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-record-a-medication: backlog
+  2-2-set-when-a-medicine-is-taken: backlog
+  2-3-reminders-that-fire-when-the-app-is-closed: backlog
+  2-4-log-a-dose-from-the-notification: backlog
+  2-5-catch-up-after-days-away: backlog
+  2-6-see-whether-medicines-are-actually-being-taken: backlog
+  2-7-photograph-a-prescription-once-not-once-per-medicine: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-schedule-a-doctor-s-appointment: backlog
+  3-2-get-reminded-before-an-appointment: backlog
+  3-3-record-what-the-doctor-said: backlog
+  3-4-track-a-child-s-vaccination-course: backlog
+  3-5-get-reminded-when-a-vaccine-dose-is-due: backlog
+  3-6-set-a-reminder-for-anything-else: backlog
+  3-7-see-the-whole-family-s-month: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-record-a-measurement: backlog
+  4-2-see-a-measurement-trend: backlog
+  4-3-record-blood-pressure-with-its-context: backlog
+  4-4-record-blood-glucose-with-its-measurement-type: backlog
+  4-5-record-a-lab-report-and-its-results: backlog
+  4-6-track-one-test-across-years: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-keep-every-document-in-one-vault: backlog
+  5-2-find-a-document-from-three-years-ago: backlog
+  5-3-see-every-health-event-in-one-feed: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-save-the-numbers-that-matter-in-an-emergency: backlog
+  6-2-one-card-with-the-facts-a-paramedic-needs: backlog
+  6-3-reach-the-card-in-two-taps: backlog
+  6-4-reach-the-card-from-a-locked-phone: backlog
+  epic-6-retrospective: optional
+
+  epic-7: backlog
+  7-1-lock-the-app-with-a-pin: backlog
+  7-2-unlock-with-a-fingerprint: backlog
+  7-3-lock-automatically: backlog
+  7-4-make-an-encrypted-backup-on-the-phone: backlog
+  7-5-restore-from-a-backup-file: backlog
+  7-6-understand-exactly-what-went-wrong: backlog
+  7-7-delete-a-member-or-everything: backlog
+  epic-7-retrospective: optional
+
+  epic-8: backlog
+  8-1-buy-private-backup-and-remove-ads: backlog
+  8-2-connect-google-drive-and-back-up: backlog
+  8-3-connect-onedrive-or-dropbox: backlog
+  8-4-restore-from-your-cloud: backlog
+  8-5-back-up-automatically: backlog
+  8-6-know-when-the-connection-breaks: backlog
+  epic-8-retrospective: optional
+
+  epic-9: backlog
+  9-1-one-page-for-the-doctor: backlog
+  9-2-a-report-for-the-whole-family: backlog
+  9-3-export-to-csv: backlog
+  9-4-export-to-json: backlog
+  9-5-import-from-csv: backlog
+  9-6-import-from-json: backlog
+  9-7-import-a-backup-file: backlog
+  epic-9-retrospective: optional
