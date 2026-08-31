@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'core/database/app_database.dart';
 import 'core/database/connection.dart';
+import 'core/database/database_key.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +17,65 @@ Future<void> main() async {
   } on Object catch (error) {
     // A database that cannot be opened encrypted is not a recoverable state.
     // Show why, on screen, instead of a white rectangle.
-    runApp(DatabaseUnavailableApp(error: error));
+    runApp(DatabaseUnavailableApp(reason: StartupFailure.classify(error)));
+  }
+}
+
+/// Why the database could not be opened, in terms the startup surface can
+/// render without ever printing an error object.
+///
+/// Raw exceptions are deliberately not carried through here.
+/// `SqliteException.toString()` prints its causing statement, and for the key
+/// pragma that statement *is* the key.
+enum StartupFailure {
+  /// The shipped SQLite library is not the SQLite3MultipleCiphers build.
+  missingCipher(
+    'This build shipped an unencrypted SQLite library, so your records would '
+    'not be protected. Jotno will not open the database in that state. '
+    'Reinstall from an official build.',
+  ),
+
+  /// The key was empty, so the database would have been left unencrypted.
+  emptyKey(
+    'Jotno was given an empty database key, which would leave your records '
+    'unencrypted. Jotno will not open the database in that state.',
+  ),
+
+  /// A release build reached the development key provider.
+  developmentKeyInRelease(
+    'This build uses a development key that is the same on every install. '
+    'Jotno will not open the database in that state. Reinstall from an '
+    'official build.',
+  ),
+
+  /// The database exists but the key does not unlock it.
+  keyRejected(
+    'The database on this device could not be unlocked with the key '
+    'available. Your records are still encrypted on disk and have not '
+    'been changed.',
+  ),
+
+  /// Anything else — corruption, a locked file, an I/O error.
+  unknown('The database could not be opened on this device.');
+
+  const StartupFailure(this.explanation);
+
+  /// What to tell the reader. Never contains anything derived from the key.
+  final String explanation;
+
+  /// Maps a startup [error] onto the reason to display.
+  ///
+  /// Classification is by type, not by matching message text, so renaming a
+  /// message cannot silently reclassify a failure.
+  static StartupFailure classify(Object error) {
+    return switch (error) {
+      MissingCipherError() => StartupFailure.missingCipher,
+      EmptyDatabaseKeyError() => StartupFailure.emptyKey,
+      DevelopmentKeyInReleaseBuildError() =>
+        StartupFailure.developmentKeyInRelease,
+      DatabaseKeyRejectedException() => StartupFailure.keyRejected,
+      _ => StartupFailure.unknown,
+    };
   }
 }
 
@@ -50,38 +109,16 @@ class JotnoApp extends StatelessWidget {
 
 /// The surface shown when the database refuses to open.
 ///
-/// The overwhelmingly likely cause is a build that shipped upstream SQLite
-/// instead of SQLite3MultipleCiphers, so the message names that first. It is
-/// intentionally unlocalised: this can fire before anything else is ready.
+/// Intentionally unlocalised: this can fire before anything else is ready.
 class DatabaseUnavailableApp extends StatelessWidget {
-  /// Creates the failure surface for [error].
-  const DatabaseUnavailableApp({required this.error, super.key});
+  /// Creates the failure surface for [reason].
+  const DatabaseUnavailableApp({required this.reason, super.key});
 
-  /// The error that stopped the database from opening.
-  final Object error;
+  /// Why the database could not be opened.
+  final StartupFailure reason;
 
   @override
   Widget build(BuildContext context) {
-    final isCipherMissing =
-        error is UnsupportedError &&
-        (error as UnsupportedError).message == cipherMissingMessage;
-    final isKeyRejected = error is DatabaseKeyRejectedException;
-
-    final String explanation;
-    if (isCipherMissing) {
-      explanation =
-          'This build shipped an unencrypted SQLite library, so your records '
-          'would not be protected. Jotno will not open the database in that '
-          'state. Reinstall from an official build.';
-    } else if (isKeyRejected) {
-      explanation =
-          'The database on this device could not be unlocked with the key '
-          'available. Your records are still encrypted on disk and have not '
-          'been changed.';
-    } else {
-      explanation = 'The database could not be opened on this device.';
-    }
-
     return MaterialApp(
       title: 'Jotno',
       debugShowCheckedModeBanner: false,
@@ -99,9 +136,7 @@ class DatabaseUnavailableApp extends StatelessWidget {
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 12),
-                  Text(explanation),
-                  const SizedBox(height: 16),
-                  Text('$error', style: const TextStyle(fontSize: 12)),
+                  Text(reason.explanation),
                 ],
               ),
             ),

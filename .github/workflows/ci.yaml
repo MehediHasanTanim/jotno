@@ -10,6 +10,15 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default; nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     working-directory: jotno
@@ -18,67 +27,139 @@ jobs:
   verify:
     name: analyze, test, migrations
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to commit SHAs, not moving tags, so a
+      # compromised tag cannot silently change what runs in CI.
+      - name: Checkout
+        # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: subosito/flutter-action@v2
+      - name: Set up Flutter
+        # subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
         with:
           flutter-version: 3.47.2
           channel: stable
+          cache: true
 
       # ---------------------------------------------------------------------
-      # The encryption gate. These two steps are the reason this workflow
+      # The encryption gates. These two steps are the reason this workflow
       # exists: a build that quietly loses the cipher looks perfectly healthy
       # until someone pulls the database file off a device.
       # ---------------------------------------------------------------------
       - name: The encryption switch is present
+        # Parsed as YAML rather than grepped, so a comment, a re-indent or a
+        # reordering cannot make the gate pass by accident.
         run: |
-          if ! grep -A3 '^hooks:' pubspec.yaml | grep -qx '      source: sqlite3mc'; then
-            echo "::error::pubspec.yaml must set hooks.user_defines.sqlite3.source to 'sqlite3mc'. Without it the app ships upstream SQLite and writes plaintext."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import sys
+          import yaml
+
+          with open('pubspec.yaml') as handle:
+              spec = yaml.safe_load(handle)
+
+          source = (
+              (spec.get('hooks') or {})
+              .get('user_defines', {})
+              .get('sqlite3', {})
+              .get('source')
+          )
+          if source != 'sqlite3mc':
+              print(
+                  '::error::pubspec.yaml must set '
+                  'hooks.user_defines.sqlite3.source to "sqlite3mc"; found '
+                  f'{source!r}. Without it the app ships upstream SQLite and '
+                  'writes the database in plaintext.'
+              )
+              sys.exit(1)
+          print('encryption switch: source = sqlite3mc')
+          PY
 
       - name: Forbidden packages are absent
         # Discontinued or banned by the architecture (AD-2). `pubspec.lock` is
-        # in scope deliberately: these must be absent from the resolved
+        # in scope deliberately: these must be absent from the *resolved*
         # dependency tree, not merely unimported. That is why the database
-        # opens through `package:drift` directly instead of the `drift_flutter`
-        # wrapper, which drags both `*_flutter_libs` packages in as end-of-life
-        # markers.
+        # opens through `package:drift` directly instead of the Flutter
+        # convenience wrapper, which drags both into the lock file.
+        #
+        # grep exits 0 on a match, 1 on no match, and >=2 on an error such as a
+        # missing path. Only 1 is success — treating >=2 as "clean" would let
+        # the gate pass while scanning nothing.
         run: |
-          if grep -R -n -E 'sqlcipher_flutter_libs|sqlite3_flutter_libs|riverpod_generator|drift_flutter' \
-               pubspec.yaml pubspec.lock build.yaml lib test integration_test android ios; then
-            echo "::error::A forbidden package is referenced above."
+          required="pubspec.yaml pubspec.lock lib"
+          for path in $required; do
+            if [ ! -e "$path" ]; then
+              echo "::error::expected $path to exist; the scan would be blind"
+              exit 1
+            fi
+          done
+
+          # Platform directories are included when present, so the gate covers
+          # them automatically if desktop or web targets are added later.
+          scan="$required build.yaml analysis_options.yaml"
+          for path in test integration_test android ios macos linux windows web; do
+            [ -e "$path" ] && scan="$scan $path"
+          done
+          echo "scanning: $scan"
+
+          pattern='sqlcipher_flutter_libs|sqlite3_flutter_libs|riverpod_generator|drift_flutter'
+          grep -R -n -E "$pattern" $scan && status=0 || status=$?
+          case "$status" in
+            0)
+              echo "::error::a forbidden package is referenced above"
+              exit 1
+              ;;
+            1)
+              echo "no forbidden packages found"
+              ;;
+            *)
+              echo "::error::grep failed with exit status $status"
+              exit 1
+              ;;
+          esac
+
+      - name: Install dependencies
+        # --enforce-lockfile fails rather than silently resolving to versions
+        # nobody reviewed.
+        run: flutter pub get --enforce-lockfile
+
+      - name: Formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Generated sources are up to date
+        # `git add -AN` gives newly generated, still-untracked files an
+        # intent-to-add entry so `git diff` can see them. Without it the gate is
+        # blind to any file the generator creates for the first time.
+        run: |
+          dart run build_runner build
+          git add -AN .
+          if ! git diff --exit-code; then
+            echo "::error::generated sources are stale; run build_runner and commit the result"
             exit 1
           fi
 
-      - run: flutter pub get
+      - name: Analyze
+        run: flutter analyze --fatal-infos
 
-      - name: Generated sources are up to date
-        run: |
-          dart run build_runner build
-          git diff --exit-code -- lib
-
-      - run: flutter analyze --fatal-infos
-
-      - run: flutter test
+      # Runs everything under `test/`, including the generated migration tests
+      # once schema v2 exists.
+      - name: Test
+        run: flutter test
 
       # Hand-written migrations are not permitted. Regenerating must be a no-op;
       # if it is not, someone changed the schema without running the tool.
       #
       # At schema v1 there is nothing to migrate *from*, so `make-migrations`
       # emits only `drift_schemas/app_database/drift_schema_v1.json`. From v2
-      # onwards it also emits `*.steps.dart` and the tests under
-      # `test/migration/`, which the `flutter test` step above then runs.
+      # onwards it also emits `*.steps.dart` and tests under `test/migration/`,
+      # which the step above then runs — hence `git add -AN` here too, since
+      # those files are brand new at the version bump.
       - name: Migration schemas are up to date
         run: |
           dart run drift_dev make-migrations
-          git diff --exit-code -- drift_schemas test/migration
-
-      - name: Migration tests
-        run: |
-          if [ -n "$(find test/migration -name '*_test.dart' -print -quit)" ]; then
-            flutter test test/migration
-          else
-            echo "No migration tests yet — expected at schema v1."
+          git add -AN .
+          if ! git diff --exit-code -- drift_schemas test/migration; then
+            echo "::error::migration schemas are stale; run drift_dev make-migrations and commit the result"
+            exit 1
           fi

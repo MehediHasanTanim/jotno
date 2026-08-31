@@ -7,6 +7,8 @@ version: 1.0.0+1
 
 environment:
   sdk: ^3.13.2
+  # Pinned so a local build cannot diverge from the version CI installs.
+  flutter: '>=3.47.2 <4.0.0'
 
 # ---------------------------------------------------------------------------
 # THE ENCRYPTION SWITCH.
@@ -31,7 +33,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  cupertino_icons: ^1.0.8
   drift: ^2.34.2
   path_provider: ^2.1.6
   sqlite3: ^3.5.0

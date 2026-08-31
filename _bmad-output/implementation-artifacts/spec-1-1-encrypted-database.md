@@ -2,7 +2,7 @@
 title: 'Story 1.1 — A database that proves it is encrypted'
 type: 'feature'
 created: '2026-08-31'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: 'b01ccc4fbcd642102dd9490848f06b26db1bd585'
 review_loop_iteration: 0
 context:

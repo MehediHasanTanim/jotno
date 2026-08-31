@@ -56,10 +56,12 @@ class AppDatabase extends _$AppDatabase {
 Future<AppDatabase> openAppDatabase({
   DatabaseKeyProvider keyProvider = const DevelopmentKeyProvider(),
   Future<Object> Function()? databaseDirectory,
+  Future<Object> Function()? temporaryDirectory,
 }) async {
   final executor = await openEncryptedDatabase(
     keyProvider: keyProvider,
     databaseDirectory: databaseDirectory,
+    temporaryDirectory: temporaryDirectory,
   );
   return AppDatabase(executor);
 }
