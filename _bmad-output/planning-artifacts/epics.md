@@ -388,10 +388,6 @@ So that a build mistake can never silently expose them.
 **Then** versioned schema files, `.steps.dart` and migration tests are generated
 **And** the migration test suite runs in CI
 
-**Given** the codebase
-**When** the logging grep gate runs in CI
-**Then** it fails on any direct `print` or `debugPrint` under `features/`
-
 ### Story 1.2: The foundations every feature is required to use
 
 As the person who will build fifty-eight more stories on top of this,
