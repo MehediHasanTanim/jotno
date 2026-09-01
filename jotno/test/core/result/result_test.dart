@@ -204,6 +204,92 @@ void main() {
     });
   });
 
+  group('chaining a Result that has not arrived yet', () {
+    // Every repository in the remaining stories returns a Future<Result<...>>.
+    // Without these each caller writes the same await-then-switch and rebuilds
+    // the failure branch by hand, which is the accretion this story exists to
+    // prevent.
+
+    Future<Result<int, AppFailure>> ok(int value) async => Success(value);
+    Future<Result<int, AppFailure>> bad() async =>
+        const Failure(StorageFailure());
+
+    test('mapAsync transforms a success', () async {
+      expect(
+        await ok(7).mapAsync((value) async => value * 2),
+        const Success<int, AppFailure>(14),
+      );
+    });
+
+    test('mapAsync accepts a synchronous transform too', () async {
+      expect(
+        await ok(7).mapAsync((value) => value * 2),
+        const Success<int, AppFailure>(14),
+      );
+    });
+
+    test('mapAsync short-circuits on a failure', () async {
+      expect(
+        await bad().mapAsync<int>(
+          (value) => fail('mapAsync ran the transform on a failure'),
+        ),
+        const Failure<int, AppFailure>(StorageFailure()),
+      );
+    });
+
+    test('flatMapAsync chains a second fallible step', () async {
+      expect(
+        await ok(7).flatMapAsync<int>((value) => ok(value + 1)),
+        const Success<int, AppFailure>(8),
+      );
+      expect(
+        await ok(7).flatMapAsync<int>((value) => bad()),
+        const Failure<int, AppFailure>(StorageFailure()),
+      );
+    });
+
+    test('flatMapAsync short-circuits on a failure', () async {
+      expect(
+        await bad().flatMapAsync<int>(
+          (value) => fail('flatMapAsync ran the transform on a failure'),
+        ),
+        const Failure<int, AppFailure>(StorageFailure()),
+      );
+    });
+
+    test('a chain of several steps stops at the first failure', () async {
+      var stepsRun = 0;
+
+      final result = await ok(1)
+          .flatMapAsync<int>((value) {
+            stepsRun++;
+            return bad();
+          })
+          .flatMapAsync<int>((value) {
+            stepsRun++;
+            return ok(value);
+          });
+
+      expect(result, const Failure<int, AppFailure>(StorageFailure()));
+      expect(stepsRun, 1, reason: 'the step after the failure still ran');
+    });
+
+    test('mapFailureAsync translates a failure and leaves a success', () async {
+      expect(
+        await bad().mapFailureAsync<AppFailure>(
+          (failure) => const NotFoundFailure(),
+        ),
+        const Failure<int, AppFailure>(NotFoundFailure()),
+      );
+      expect(
+        await ok(7).mapFailureAsync<AppFailure>(
+          (failure) => fail('mapFailureAsync ran the transform on a success'),
+        ),
+        const Success<int, AppFailure>(7),
+      );
+    });
+  });
+
   group('no path yields null', () {
     // The guarantee is a type-level one: there is no `valueOrNull`, no
     // nullable `failure` getter, and no member declared to return `T?` or

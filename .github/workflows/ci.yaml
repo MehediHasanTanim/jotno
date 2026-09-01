@@ -141,16 +141,22 @@ jobs:
 
       # The logging gate. Sits beside Analyze because it is the same kind of
       # check — static, cheap, and about what the source is allowed to contain
-      # — but it catches what the analyzer cannot: `avoid_print` covers `print`
-      # and says nothing about `debugPrint`, and both write medical records to
-      # `adb logcat` where nothing can redact them afterwards.
+      # — but it catches what the analyzer cannot. `avoid_print` covers `print`
+      # and says nothing about `debugPrint`, `debugPrintStack`,
+      # `stdout.writeln`, `stderr.writeln` or `dart:developer`'s `log`, and
+      # every one of those writes medical records to `adb logcat` where nothing
+      # can redact them afterwards. The gate closes all of them and allows
+      # `dart:developer` in exactly one file: the writer that needs it.
       #
-      # The scan itself lives in `tool/no_print_gate.sh` so a developer can run
+      # The scan lives in `tool/no_print_gate.sh` so a developer can run
       # exactly what CI runs, and so `test/tool/no_print_gate_test.dart` can
-      # prove it fails on a real offending file rather than assuming it would.
+      # prove it fails on real offending files rather than assuming it would.
       # That script handles grep's exit codes the same way the two gates above
-      # do: only exit 1 is clean, >=2 is a broken scan, not a passing one.
-      - name: No direct print or debugPrint under lib
+      # do: only exit 1 is clean, >=2 is a broken scan, not a passing one. It
+      # prints plain `file:line:` matches rather than `::error file=`
+      # annotations, because this job runs with `working-directory: jotno`
+      # while GitHub resolves annotation paths from the repository root.
+      - name: Nothing under lib writes to the device log
         run: bash tool/no_print_gate.sh
 
       - name: Analyze

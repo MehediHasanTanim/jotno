@@ -90,6 +90,10 @@ New:
 
 ## Spec Change Log
 
+- **Guard hole closed.** Finding: the no-String-field check used `RegExp(r"\bString\b\s+\w+\s*;")`, which caught `final String message;` but missed `final String? message;` and `String message = "";` — the exact field it existed to prevent. A guard with a hole is worse than no guard. Amended: four named shapes covering nullable, initialiser, parameter and generic forms, with a test-of-the-test running 11 rejected and 8 allowed shapes. KEEP: the allowed-shapes half matters as much as the rejected half — a false positive gets the guard deleted.
+- **The gate closed one door and left three open.** Finding: `print` was blocked while `dart:developer`'s `log`, `stdout`/`stderr` writes and `debugPrintStack` all reached the same logcat. Amended: three scans, with `dart:developer` banned by *import* rather than call site — the call can be spelled `log`, `developer.log` or `dev.log` but cannot be made without the import. Allowlisted to `log_writer.dart` alone.
+- **Infrastructure made live.** Finding: three events were allowlisted and none emitted, so the line deciding where a real log goes had zero coverage. Amended: `main.dart` emits all three; `startupSurface()` extracted so emission is testable. KEEP: Story 1.1's awaited structure and its try/catch are byte-identical — only `runApp` moved out.
+
 ## Design Notes
 
 The point of `AppLogger` is not that it filters health data — it is that health data has nowhere to go. A signature like `event(AnalyticsEvent name, {int? count, Duration? elapsed, bool? succeeded})` cannot carry a diagnosis. A `Map<String, Object?>` parameter can, so there must not be one.

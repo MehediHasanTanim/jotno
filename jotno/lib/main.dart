@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import 'core/database/app_database.dart';
 import 'core/database/connection.dart';
 import 'core/database/database_key.dart';
+import 'core/logging/analytics_events.dart';
+import 'core/logging/app_logger.dart';
+import 'core/result/app_failure.dart';
 
 /// How long startup may take before the app gives up and says so.
 ///
@@ -20,16 +23,61 @@ const Duration startupTimeout = Duration(seconds: 30);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  runApp(await startupSurface());
+}
+
+/// Opens the database and decides what the app shows.
+///
+/// Split out of [main] so the startup events below can be asserted against a
+/// recording logger. `main` itself cannot be driven from a test — it opens a
+/// real database and calls `runApp` — and an event nobody has watched being
+/// emitted is worth about as much as a gate nobody has watched fail.
+///
+/// The awaited structure is Story 1.1's and must stay that way: the cipher and
+/// the key are proven in plain awaited code before anything else happens, so a
+/// failure lands in the `catch` below with its type intact rather than
+/// depending on drift to surface an error raised inside a lazy opener. Only
+/// `runApp` moved out.
+@visibleForTesting
+Future<Widget> startupSurface({
+  AppLogger logger = const AppLogger(),
+  Future<AppDatabase> Function() open = _openDatabase,
+  Duration timeout = startupTimeout,
+}) async {
+  final stopwatch = Stopwatch()..start();
 
   try {
-    final database = await _openDatabase().timeout(startupTimeout);
-    runApp(JotnoApp(database: database));
+    final database = await open().timeout(timeout);
+    logger.event(
+      AnalyticsEvent.databaseOpened,
+      elapsed: stopwatch.elapsed,
+      succeeded: true,
+    );
+    logger.event(AnalyticsEvent.appOpened, elapsed: stopwatch.elapsed);
+    return JotnoApp(database: database);
   } on TimeoutException {
-    runApp(const DatabaseUnavailableApp(reason: StartupFailure.timedOut));
+    logger.event(
+      AnalyticsEvent.appStartupFailed,
+      elapsed: stopwatch.elapsed,
+      succeeded: false,
+      failure: const UnexpectedFailure(errorType: TimeoutException),
+    );
+    return const DatabaseUnavailableApp(reason: StartupFailure.timedOut);
   } on Object catch (error) {
     // A database that cannot be opened encrypted is not a recoverable state.
     // Show why, on screen, instead of a black rectangle.
-    runApp(DatabaseUnavailableApp(reason: StartupFailure.classify(error)));
+    //
+    // Only the error's *type* is recorded. `SqliteException.toString()` prints
+    // its causing statement, and for the key pragma that statement is the key,
+    // so `UnexpectedFailure.from` keeps the type and drops the error here —
+    // the one place it could still have been read.
+    logger.event(
+      AnalyticsEvent.appStartupFailed,
+      elapsed: stopwatch.elapsed,
+      succeeded: false,
+      failure: UnexpectedFailure.from(error),
+    );
+    return DatabaseUnavailableApp(reason: StartupFailure.classify(error));
   }
 }
 

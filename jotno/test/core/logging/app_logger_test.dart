@@ -83,6 +83,33 @@ void main() {
       expect(line, isNot(contains('jotno.sqlite')));
     });
 
+    test('an unexpected failure with no known type renders just its key', () {
+      expect(
+        formatLogEntry(
+          const LogEntry(
+            AnalyticsEvent.appStartupFailed,
+            failure: UnexpectedFailure(),
+          ),
+        ),
+        'app_startup_failed failure=failureUnexpected',
+      );
+    });
+
+    test('a sub-millisecond duration renders as 0ms, not as nothing', () {
+      // `inMilliseconds` truncates. The field was supplied, so it must still
+      // appear — a missing `elapsed=` reads as "not measured" rather than
+      // "faster than a millisecond".
+      expect(
+        formatLogEntry(
+          const LogEntry(
+            AnalyticsEvent.databaseOpened,
+            elapsed: Duration(microseconds: 400),
+          ),
+        ),
+        'database_opened elapsed=0ms',
+      );
+    });
+
     test('the rendered line holds nothing beyond name and typed fields', () {
       // Every field set at once. If a rendering branch ever grows a new source
       // of text, this exact match is what notices.
@@ -102,26 +129,59 @@ void main() {
     });
   });
 
-  group('the release build writes nothing', () {
+  group('a shipping build writes nothing', () {
     // The branch that matters most is the one a test can never be running in,
     // so it is injected — the same reason `RawDatabaseOpener` is injectable in
     // the database connection.
     setUp(_captured.clear);
 
-    test('a release build emits no line at all', () {
+    test('a shipping build emits no line at all', () {
       const AppLogger(
-        writer: DeveloperLogWriter(isReleaseBuild: true, emit: _capture),
+        writer: DeveloperLogWriter(isShippingBuild: true, emit: _capture),
       ).event(AnalyticsEvent.appOpened, count: 1);
 
       expect(_captured, isEmpty);
     });
 
-    test('a non-release build emits the rendered line', () {
+    test('a debug build emits the rendered line', () {
       const AppLogger(
-        writer: DeveloperLogWriter(isReleaseBuild: false, emit: _capture),
+        writer: DeveloperLogWriter(isShippingBuild: false, emit: _capture),
       ).event(AnalyticsEvent.appOpened, count: 1);
 
       expect(_captured, ['app_opened count=1']);
+    });
+
+    test('profile counts as shipping, not as debug', () {
+      // `flutter build --profile` is what goes onto a tester's real phone to
+      // measure the three-second cold start. Gating on `kReleaseMode` alone
+      // would leave every line of it in that device's logcat. The default is
+      // a compile-time constant, so the guard has to be read off the source.
+      final code = readPackageCode('lib/core/logging/log_writer.dart');
+
+      expect(
+        code,
+        contains('kReleaseMode || kProfileMode'),
+        reason:
+            'the default silence gate no longer covers profile builds, which '
+            'run on real devices with real records on them',
+      );
+    });
+
+    test('a debug test run is not treated as shipping', () {
+      // Proves the constant resolves the way the tests above assume, rather
+      // than every one of them passing vacuously against a silent writer.
+      expect(const DeveloperLogWriter().isShippingBuild, isFalse);
+    });
+
+    test('the shipped writer runs its real emit path', () {
+      // Every other test injects `emit:`, which leaves the one line deciding
+      // where a real log actually goes with no coverage at all. This calls it.
+      const writer = DeveloperLogWriter();
+
+      expect(
+        () => writer.write(const LogEntry(AnalyticsEvent.appOpened, count: 1)),
+        returnsNormally,
+      );
     });
   });
 
@@ -166,26 +226,36 @@ void main() {
       });
     }
 
-    test('the entry it builds has no free-text field either', () {
-      // Pinned exactly, so adding a field to `LogEntry` — or to the writer —
-      // has to be a decision taken here as well as there. Text exists in that
-      // file in exactly one place: the writer's emit callback, which is fed by
-      // `formatLogEntry`, never by a caller. That declaration spans a
-      // parenthesised function type and is therefore not matched below.
+    test('the entry it builds can hold no text either', () {
+      // Scoped to `LogEntry`'s own body rather than the whole file. Text does
+      // legitimately exist in `log_writer.dart` — `formatLogEntry` builds the
+      // line, and the writer's `emit` callback takes it — so a whole-file scan
+      // would either fail on the rendering code or have to exempt so much
+      // that it stopped meaning anything. What must hold no text is the
+      // record. An unrelated private field is not a failure here; a
+      // `String? note` is.
       final entryCode = readPackageCode('lib/core/logging/log_writer.dart');
-      final fields = RegExp(
-        r'^\s*final\s+([\w<>?, ]+?)\s+\w+\s*;',
-        multiLine: true,
-      ).allMatches(entryCode).map((match) => match.group(1)!.trim()).toSet();
+      final body = RegExp(
+        r'final class LogEntry \{(.*?)\n\}',
+        dotAll: true,
+      ).firstMatch(entryCode);
 
-      expect(fields, {
-        'AnalyticsEvent',
-        'int?',
-        'Duration?',
-        'bool?',
-        'AppFailure?',
-        'bool',
-      });
+      expect(
+        body,
+        isNotNull,
+        reason:
+            'could not find the LogEntry class body, so this test is scanning '
+            'nothing and would pass whatever happened',
+      );
+      expect(
+        freeTextShapesIn(body!.group(1)!),
+        isEmpty,
+        reason:
+            'LogEntry gained somewhere text can sit. Every field must be a '
+            'closed type — an allowlisted event, a count, a duration, a flag, '
+            'or a sealed AppFailure — so that a member name has no field to '
+            'travel in.',
+      );
     });
   });
 

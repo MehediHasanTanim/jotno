@@ -16,10 +16,14 @@ import 'dart:io';
 
 /// Loads a file by its path relative to the package root.
 ///
+/// Private: every caller must go through [readPackageCode], because reading a
+/// file without stripping its comments lets a doc comment satisfy an
+/// assertion about the code.
+///
 /// `flutter test` runs with the package root as the working directory. If that
 /// ever stops being true this throws rather than silently passing on an empty
 /// string.
-String readPackageSource(String relativePath) {
+String _readPackageSource(String relativePath) {
   final file = File(relativePath);
   if (!file.existsSync()) {
     throw StateError(
@@ -40,7 +44,7 @@ String readPackageSource(String relativePath) {
 /// Caveat: a `//` inside a string literal truncates that line. None of the
 /// files checked here contain one, and a test failing loudly is the acceptable
 /// outcome if one is ever added.
-String withoutComments(String source) {
+String _withoutComments(String source) {
   final withoutBlockComments = source.replaceAll(
     RegExp(r'/\*.*?\*/', dotAll: true),
     '',
@@ -56,4 +60,32 @@ String withoutComments(String source) {
 
 /// The code of [relativePath] with its comments removed.
 String readPackageCode(String relativePath) =>
-    withoutComments(readPackageSource(relativePath));
+    _withoutComments(_readPackageSource(relativePath));
+
+/// The shapes, in Dart source, of a field or parameter that can hold text.
+///
+/// Written out and named rather than inlined at each call site so the test in
+/// `app_failure_test.dart` can point them at synthetic snippets and show that
+/// each shape is rejected. A guard with a hole in it is worse than no guard:
+/// it reads as coverage and provides none. The first version of this matched
+/// only `String message;` and let the nullable and initialiser forms through.
+const Map<String, String> freeTextShapes = <String, String>{
+  // Catches `String x;`, `String? x;`, `String x = '';`, `String x,` and
+  // `String x)` — the nullable, initialiser and parameter forms as well as
+  // the plain one. `String get foo` and `String toString()` are not caught,
+  // because a word and a `(` follow instead.
+  'a String field or parameter': r'\bString\??\s+\w+\s*[;=,)]',
+  // `List<String>`, `Map<String, ...>` — text smuggled inside a collection.
+  'a String inside a generic': r'<\s*String\b',
+  // `dynamic` accepts anything, which includes text.
+  'a dynamic member': r'\bdynamic\b',
+  // `)` is deliberately absent here: `operator ==(Object other)` is forced by
+  // Dart's own contract and is the one legitimate `Object` in these files.
+  'an Object field': r'\bObject\??\s+\w+\s*[;=,]',
+};
+
+/// The free-text shapes [code] contains, by name.
+List<String> freeTextShapesIn(String code) => <String>[
+  for (final shape in freeTextShapes.entries)
+    if (RegExp(shape.value).hasMatch(code)) shape.key,
+];

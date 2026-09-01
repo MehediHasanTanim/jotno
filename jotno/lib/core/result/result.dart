@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 /// The outcome of an operation that can fail.
@@ -167,4 +169,54 @@ final class Failure<T, F extends Object> extends Result<T, F> {
   /// type, never a message and never anything derived from user data.
   @override
   String toString() => 'Failure<$T>($failure)';
+}
+
+/// Chaining on a [Result] that has not arrived yet.
+///
+/// Every repository in the remaining stories returns a `Future<Result<...>>`,
+/// and without these each caller writes the same `await`-then-`switch` and
+/// then rebuilds the failure branch by hand. That is exactly the accretion
+/// this story exists to prevent, so the combinators live here once:
+///
+/// ```dart
+/// final result = await repository
+///     .loadMember(id)
+///     .flatMapAsync((member) => repository.loadConditions(member.id));
+/// ```
+///
+/// A failure short-circuits: the transform never runs, and the original
+/// failure is carried through unchanged.
+extension FutureResultChaining<T, F extends Object> on Future<Result<T, F>> {
+  /// Applies [transform] to a success value once it arrives.
+  Future<Result<R, F>> mapAsync<R>(
+    FutureOr<R> Function(T value) transform,
+  ) async {
+    final result = await this;
+    return switch (result) {
+      Success(:final value) => Success<R, F>(await transform(value)),
+      Failure(:final failure) => Failure<R, F>(failure),
+    };
+  }
+
+  /// Chains another fallible, asynchronous step onto a success value.
+  Future<Result<R, F>> flatMapAsync<R>(
+    FutureOr<Result<R, F>> Function(T value) transform,
+  ) async {
+    final result = await this;
+    return switch (result) {
+      Success(:final value) => await transform(value),
+      Failure(:final failure) => Failure<R, F>(failure),
+    };
+  }
+
+  /// Applies [transform] to a failure once it arrives.
+  Future<Result<T, G>> mapFailureAsync<G extends Object>(
+    FutureOr<G> Function(F failure) transform,
+  ) async {
+    final result = await this;
+    return switch (result) {
+      Success(:final value) => Success<T, G>(value),
+      Failure(:final failure) => Failure<T, G>(await transform(failure)),
+    };
+  }
 }

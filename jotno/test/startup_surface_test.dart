@@ -1,11 +1,26 @@
-import 'dart:io';
+import 'dart:async';
 
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:jotno/core/database/app_database.dart';
 import 'package:jotno/core/database/connection.dart';
 import 'package:jotno/core/database/database_key.dart';
+import 'package:jotno/core/logging/analytics_events.dart';
+import 'package:jotno/core/logging/app_logger.dart';
+import 'package:jotno/core/logging/log_writer.dart';
+import 'package:jotno/core/result/app_failure.dart';
 import 'package:jotno/main.dart';
-import 'package:sqlite3/common.dart';
+
+import 'support/dart_source.dart';
+
+/// A [LogWriter] that keeps what it was given.
+final class _RecordingLogWriter implements LogWriter {
+  final List<LogEntry> entries = <LogEntry>[];
+
+  @override
+  void write(LogEntry entry) => entries.add(entry);
+}
 
 /// The startup surface is the user-visible form of the distinction this story
 /// exists to preserve: "this build is not encrypted" and "this key is wrong"
@@ -144,10 +159,14 @@ void main() {
     test('the keys are literals, not derived from the enum name', () {
       // `name` is stripped by obfuscation and changes under a rename, either
       // of which would silently repoint a message once ARB is wired.
-      final source = File('lib/main.dart').readAsStringSync();
+      //
+      // Read through the comment-stripping helper, not `File(...)` directly:
+      // with comments left in, a key mentioned only in a doc comment would
+      // satisfy this assertion while no code produced it.
+      final code = readPackageCode('lib/main.dart');
 
       for (final reason in StartupFailure.values) {
-        expect(source, contains("'${reason.localisationKey}'"));
+        expect(code, contains("'${reason.localisationKey}'"));
       }
     });
 
@@ -161,6 +180,101 @@ void main() {
               'not written as a fixed constant',
         );
       }
+    });
+  });
+
+  group('startupSurface records what happened', () {
+    // The events are the only trace a startup failure leaves. If they are
+    // emitted with the wrong fields — or carry the error rather than its type
+    // — nobody finds out from reading the code, so they are asserted here
+    // against a recording logger.
+
+    test('a successful start records the open and the app', () async {
+      final writer = _RecordingLogWriter();
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+
+      final surface = await startupSurface(
+        logger: AppLogger(writer: writer),
+        open: () async => database,
+      );
+
+      expect(surface, isA<JotnoApp>());
+      expect(writer.entries.map((entry) => entry.event).toList(), [
+        AnalyticsEvent.databaseOpened,
+        AnalyticsEvent.appOpened,
+      ]);
+      expect(writer.entries.first.succeeded, isTrue);
+      expect(writer.entries.first.elapsed, isNotNull);
+      expect(writer.entries.first.failure, isNull);
+    });
+
+    test(
+      'a timeout records the failure and shows the timeout surface',
+      () async {
+        final writer = _RecordingLogWriter();
+
+        final surface = await startupSurface(
+          logger: AppLogger(writer: writer),
+          open: () => Completer<AppDatabase>().future,
+          timeout: const Duration(milliseconds: 10),
+        );
+
+        expect(surface, isA<DatabaseUnavailableApp>());
+        expect(
+          (surface as DatabaseUnavailableApp).reason,
+          StartupFailure.timedOut,
+        );
+        expect(writer.entries.single.event, AnalyticsEvent.appStartupFailed);
+        expect(writer.entries.single.succeeded, isFalse);
+        expect(
+          writer.entries.single.failure,
+          const UnexpectedFailure(errorType: TimeoutException),
+        );
+      },
+    );
+
+    test('a rejected key records the type and never the error', () async {
+      final writer = _RecordingLogWriter();
+
+      final surface = await startupSurface(
+        logger: AppLogger(writer: writer),
+        open: () async => throw const DatabaseKeyRejectedException(),
+      );
+
+      expect(
+        (surface as DatabaseUnavailableApp).reason,
+        StartupFailure.keyRejected,
+      );
+      expect(
+        writer.entries.single.failure,
+        const UnexpectedFailure(errorType: DatabaseKeyRejectedException),
+      );
+    });
+
+    test('nothing recorded at startup can carry the database key', () async {
+      // The whole point. A SqliteException whose causing statement holds the
+      // key goes in; only the type comes out, and the rendered line proves it.
+      const key = 'super-secret-key';
+      final writer = _RecordingLogWriter();
+
+      await startupSurface(
+        logger: AppLogger(writer: writer),
+        open: () async => throw SqliteException(
+          extendedResultCode: 26,
+          message: 'file is not a database',
+          causingStatement: "pragma key = '\$key'",
+        ),
+      );
+
+      for (final entry in writer.entries) {
+        expect(formatLogEntry(entry), isNot(contains(key)));
+        expect(formatLogEntry(entry), isNot(contains('pragma')));
+      }
+      expect(
+        formatLogEntry(writer.entries.single),
+        contains('errorType=SqliteException'),
+      );
     });
   });
 

@@ -7,6 +7,13 @@ import 'result.dart';
 /// Every layer boundary in Jotno returns one of these.
 typedef AppResult<T> = Result<T, AppFailure>;
 
+/// An [AppResult] that has not arrived yet.
+///
+/// The shape every repository method in the remaining stories returns. Chain
+/// these with `mapAsync` and `flatMapAsync` rather than awaiting and switching
+/// by hand — see `FutureResultChaining` in `result.dart`.
+typedef FutureResult<T> = Future<AppResult<T>>;
+
 /// Why an operation failed, in terms a layer boundary may hand outward.
 ///
 /// Sealed, so a `switch` over a failure is exhaustive and adding a variant

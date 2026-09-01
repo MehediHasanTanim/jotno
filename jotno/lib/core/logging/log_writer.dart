@@ -89,36 +89,44 @@ String formatLogEntry(LogEntry entry) {
 
 /// The one [LogWriter] Jotno ships.
 ///
-/// In a release build it writes nothing at all. That is not a level filter
-/// that someone can turn up later — there is no backend, no persistence and no
-/// level, so a release build has no log for a device-log scraper or a support
+/// In a shipping build it writes nothing at all. That is not a level filter
+/// someone can turn up later — there is no backend, no persistence and no
+/// level, so a shipping build has no log for a device-log scraper or a support
 /// bundle to pick a diagnosis out of.
 ///
-/// In debug and profile builds it goes to `dart:developer`'s `log`, not to the
-/// console functions the CI gate forbids under `lib/`. Those two facts are the
-/// same decision seen from either side.
+/// **Profile counts as shipping.** `flutter build --profile` is what gets
+/// installed on a tester's real phone to measure the three-second cold start,
+/// and a profile build that logs is a profile build writing medical records to
+/// `logcat` on somebody's actual device. Gating on `kReleaseMode` alone would
+/// have left that door open, and profile is the build most likely to be
+/// running on hardware nobody is watching. Debug is the only mode that logs,
+/// and debug is the only mode a developer is sitting in front of.
+///
+/// Where it does write, it goes to `dart:developer`'s `log` — not to the
+/// console functions the CI gate forbids under `lib/`. This file is the single
+/// place `dart:developer` may be imported, and the gate enforces that too.
 @immutable
 final class DeveloperLogWriter implements LogWriter {
   /// Creates the writer.
   ///
-  /// [isReleaseBuild] and [emit] are injectable for the same reason
-  /// `RawDatabaseOpener` is: the release branch is the one that matters most
+  /// [isShippingBuild] and [emit] are injectable for the same reason
+  /// `RawDatabaseOpener` is: the silent branch is the one that matters most
   /// and cannot otherwise be exercised from a test, which always runs in
   /// debug.
   const DeveloperLogWriter({
-    this.isReleaseBuild = kReleaseMode,
+    this.isShippingBuild = kReleaseMode || kProfileMode,
     this.emit = _emitToDeveloperLog,
   });
 
-  /// Whether this is a release build, in which case nothing is written.
-  final bool isReleaseBuild;
+  /// Whether this build ships to a device, in which case nothing is written.
+  final bool isShippingBuild;
 
-  /// Where a rendered line goes in a non-release build.
+  /// Where a rendered line goes in a debug build.
   final void Function(String line) emit;
 
   @override
   void write(LogEntry entry) {
-    if (isReleaseBuild) {
+    if (isShippingBuild) {
       return;
     }
     emit(formatLogEntry(entry));

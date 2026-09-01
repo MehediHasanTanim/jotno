@@ -1,0 +1,1706 @@
+diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml
+index 844f699..a7ec7dd 100644
+--- a/.github/workflows/ci.yaml
++++ b/.github/workflows/ci.yaml
+@@ -139,6 +139,20 @@ jobs:
+             exit 1
+           fi
+ 
++      # The logging gate. Sits beside Analyze because it is the same kind of
++      # check — static, cheap, and about what the source is allowed to contain
++      # — but it catches what the analyzer cannot: `avoid_print` covers `print`
++      # and says nothing about `debugPrint`, and both write medical records to
++      # `adb logcat` where nothing can redact them afterwards.
++      #
++      # The scan itself lives in `tool/no_print_gate.sh` so a developer can run
++      # exactly what CI runs, and so `test/tool/no_print_gate_test.dart` can
++      # prove it fails on a real offending file rather than assuming it would.
++      # That script handles grep's exit codes the same way the two gates above
++      # do: only exit 1 is clean, >=2 is a broken scan, not a passing one.
++      - name: No direct print or debugPrint under lib
++        run: bash tool/no_print_gate.sh
++
+       - name: Analyze
+         run: flutter analyze --fatal-infos
+ 
+diff --git a/jotno/lib/core/logging/analytics_events.dart b/jotno/lib/core/logging/analytics_events.dart
+new file mode 100644
+index 0000000..6b70401
+--- /dev/null
++++ b/jotno/lib/core/logging/analytics_events.dart
+@@ -0,0 +1,38 @@
++/// The complete list of events Jotno is permitted to record.
++///
++/// This enum *is* the allowlist. `AppLogger` takes an [AnalyticsEvent], not a
++/// name, so an event that is not declared here cannot be logged: the code
++/// referring to it does not compile. There is no runtime rejection path
++/// because there is no runtime path at all.
++///
++/// **Adding an event is a privacy decision, not a plumbing one.** The name is
++/// the payload — it leaves the device — so it must describe an action, never
++/// its subject. `dose_actioned` is permitted; `dose_actioned_metformin` is
++/// not. Nothing derived from a member, a condition, a medication, a
++/// measurement, a lab value or a document may appear in a name, and a name
++/// must never be assembled at runtime.
++///
++/// The privacy policy tells the reader that analytics receives event names and
++/// timestamps only. This list is what that sentence is promising.
++enum AnalyticsEvent {
++  /// The app reached a usable state.
++  appOpened('app_opened'),
++
++  /// Startup failed and the unavailable surface was shown instead.
++  ///
++  /// Which failure it was travels as an `AppFailure`, whose localisation key
++  /// is a fixed string; the underlying error never does.
++  appStartupFailed('app_startup_failed'),
++
++  /// The encrypted database was opened and answered a query.
++  databaseOpened('database_opened');
++
++  const AnalyticsEvent(this.eventName);
++
++  /// The wire name, in `lower_snake_case`.
++  ///
++  /// Declared explicitly rather than taken from the enum's own `name` so that
++  /// renaming the Dart constant cannot change what analytics receives, and so
++  /// that an obfuscated release build reports the same string as a debug one.
++  final String eventName;
++}
+diff --git a/jotno/lib/core/logging/app_logger.dart b/jotno/lib/core/logging/app_logger.dart
+new file mode 100644
+index 0000000..9b8ae8b
+--- /dev/null
++++ b/jotno/lib/core/logging/app_logger.dart
+@@ -0,0 +1,55 @@
++import '../result/app_failure.dart';
++import 'analytics_events.dart';
++import 'log_writer.dart';
++
++/// The only way anything in Jotno is recorded.
++///
++/// The guarantee this class makes is not that it filters health data out. It
++/// is that health data has nowhere to go. Read the signature of [event]: an
++/// allowlisted enum, a count, a duration, a flag, and a sealed failure that
++/// carries a localisation key. A member name, a medication, a condition, a
++/// measurement or an error message has no parameter to travel in, so passing
++/// one is a compile error rather than a review finding.
++///
++/// That is why there is no free-text parameter and, in particular, no
++/// map or list of extras. One such parameter would undo the whole class, and
++/// it would be added by someone in a hurry who only needed to log one string
++/// this once.
++///
++/// If a future event genuinely needs a new dimension, add another closed-type
++/// named parameter here and think about it once, in this file, rather than at
++/// each of the several hundred call sites.
++///
++/// Nothing is written in a release build — see [DeveloperLogWriter].
++final class AppLogger {
++  /// Creates a logger writing through [writer].
++  ///
++  /// The default is the writer Jotno ships; tests pass their own to observe
++  /// what was recorded.
++  const AppLogger({this.writer = const DeveloperLogWriter()});
++
++  /// Where recorded entries go.
++  final LogWriter writer;
++
++  /// Records that [event] happened.
++  ///
++  /// Every field is optional and every field is a closed type. Supply the ones
++  /// that apply.
++  void event(
++    AnalyticsEvent event, {
++    int? count,
++    Duration? elapsed,
++    bool? succeeded,
++    AppFailure? failure,
++  }) {
++    writer.write(
++      LogEntry(
++        event,
++        count: count,
++        elapsed: elapsed,
++        succeeded: succeeded,
++        failure: failure,
++      ),
++    );
++  }
++}
+diff --git a/jotno/lib/core/logging/log_writer.dart b/jotno/lib/core/logging/log_writer.dart
+new file mode 100644
+index 0000000..96b9d34
+--- /dev/null
++++ b/jotno/lib/core/logging/log_writer.dart
+@@ -0,0 +1,128 @@
++import 'dart:developer' as developer;
++
++import 'package:flutter/foundation.dart';
++
++import '../result/app_failure.dart';
++import 'analytics_events.dart';
++
++/// One thing that happened, in the only shape Jotno can record.
++///
++/// Every field is a closed type: an allowlisted [AnalyticsEvent], a count, a
++/// duration, a flag, and a sealed [AppFailure] that itself carries only a
++/// localisation key. There is nowhere in this record for a member name, a
++/// medication, a measurement or an error message to sit.
++@immutable
++final class LogEntry {
++  /// Records that [event] happened, with whatever typed fields apply.
++  const LogEntry(
++    this.event, {
++    this.count,
++    this.elapsed,
++    this.succeeded,
++    this.failure,
++  });
++
++  /// What happened. Comes from the compile-time allowlist.
++  final AnalyticsEvent event;
++
++  /// How many of something — members, rows, retries.
++  ///
++  /// A count is a magnitude, not a fact about a person.
++  final int? count;
++
++  /// How long the operation took.
++  final Duration? elapsed;
++
++  /// Whether the operation succeeded.
++  final bool? succeeded;
++
++  /// Why it failed, when it failed.
++  final AppFailure? failure;
++}
++
++/// Where an [LogEntry] goes once it has been recorded.
++///
++/// A seam, not an extension point: [DeveloperLogWriter] is the only
++/// implementation Jotno ships. It exists so tests can observe what was
++/// recorded, and so a future sink (an analytics interface with a no-op
++/// implementation, per the architecture) has a place to attach without
++/// widening `AppLogger`'s signature.
++abstract interface class LogWriter {
++  /// Records [entry].
++  void write(LogEntry entry);
++}
++
++/// Renders [entry] as one line.
++///
++/// Only the event name and the fields that were supplied appear. There is no
++/// branch that can emit anything else, because [LogEntry] holds nothing else.
++String formatLogEntry(LogEntry entry) {
++  final parts = <String>[entry.event.eventName];
++
++  final count = entry.count;
++  if (count != null) {
++    parts.add('count=$count');
++  }
++
++  final elapsed = entry.elapsed;
++  if (elapsed != null) {
++    parts.add('elapsed=${elapsed.inMilliseconds}ms');
++  }
++
++  final succeeded = entry.succeeded;
++  if (succeeded != null) {
++    parts.add('succeeded=$succeeded');
++  }
++
++  final failure = entry.failure;
++  if (failure != null) {
++    // The localisation key, never a message: `AppFailure` has no message to
++    // render, which is the reason it has none.
++    parts.add('failure=${failure.localisationKey}');
++    if (failure case UnexpectedFailure(errorType: final Type errorType)) {
++      parts.add('errorType=$errorType');
++    }
++  }
++
++  return parts.join(' ');
++}
++
++/// The one [LogWriter] Jotno ships.
++///
++/// In a release build it writes nothing at all. That is not a level filter
++/// that someone can turn up later — there is no backend, no persistence and no
++/// level, so a release build has no log for a device-log scraper or a support
++/// bundle to pick a diagnosis out of.
++///
++/// In debug and profile builds it goes to `dart:developer`'s `log`, not to the
++/// console functions the CI gate forbids under `lib/`. Those two facts are the
++/// same decision seen from either side.
++@immutable
++final class DeveloperLogWriter implements LogWriter {
++  /// Creates the writer.
++  ///
++  /// [isReleaseBuild] and [emit] are injectable for the same reason
++  /// `RawDatabaseOpener` is: the release branch is the one that matters most
++  /// and cannot otherwise be exercised from a test, which always runs in
++  /// debug.
++  const DeveloperLogWriter({
++    this.isReleaseBuild = kReleaseMode,
++    this.emit = _emitToDeveloperLog,
++  });
++
++  /// Whether this is a release build, in which case nothing is written.
++  final bool isReleaseBuild;
++
++  /// Where a rendered line goes in a non-release build.
++  final void Function(String line) emit;
++
++  @override
++  void write(LogEntry entry) {
++    if (isReleaseBuild) {
++      return;
++    }
++    emit(formatLogEntry(entry));
++  }
++}
++
++void _emitToDeveloperLog(String line) => developer.log(line, name: 'jotno');
+diff --git a/jotno/lib/core/result/app_failure.dart b/jotno/lib/core/result/app_failure.dart
+new file mode 100644
+index 0000000..4c00ddd
+--- /dev/null
++++ b/jotno/lib/core/result/app_failure.dart
+@@ -0,0 +1,177 @@
++import 'package:flutter/foundation.dart';
++
++import 'result.dart';
++
++/// A [Result] whose failure side is always an [AppFailure].
++///
++/// Every layer boundary in Jotno returns one of these.
++typedef AppResult<T> = Result<T, AppFailure>;
++
++/// Why an operation failed, in terms a layer boundary may hand outward.
++///
++/// Sealed, so a `switch` over a failure is exhaustive and adding a variant
++/// breaks every caller that has to care.
++///
++/// **An [AppFailure] never carries a message.** It carries a
++/// [localisationKey], and Story 1.3 resolves that key against the ARB files in
++/// the reader's language. A `String message` field would be a free-text hole
++/// straight into the UI and into any log that renders a failure, and free text
++/// in this app means a condition name or a medication name sooner or later.
++///
++/// The keys are literal constants, not derived from `runtimeType`. A rename or
++/// an obfuscated release build must not be able to change which string a
++/// reader sees.
++@immutable
++sealed class AppFailure {
++  /// Const constructor for the variants below.
++  const AppFailure();
++
++  /// The ARB key naming the message to show for this failure.
++  ///
++  /// Stable across renames, unique across variants, and never empty.
++  String get localisationKey;
++}
++
++/// Reading or writing the local database failed.
++///
++/// Disk full, file locked, I/O error — anything where the store itself is the
++/// problem rather than what was asked of it.
++@immutable
++final class StorageFailure extends AppFailure {
++  /// Creates a storage failure.
++  const StorageFailure();
++
++  @override
++  String get localisationKey => 'failureStorage';
++
++  @override
++  bool operator ==(Object other) => other is StorageFailure;
++
++  @override
++  int get hashCode => (StorageFailure).hashCode;
++
++  @override
++  String toString() => 'StorageFailure($localisationKey)';
++}
++
++/// The input was rejected before anything was written.
++///
++/// Deliberately carries no field name and no offending value: the value is
++/// health data by default, and the field is the caller's own business.
++@immutable
++final class ValidationFailure extends AppFailure {
++  /// Creates a validation failure.
++  const ValidationFailure();
++
++  @override
++  String get localisationKey => 'failureValidation';
++
++  @override
++  bool operator ==(Object other) => other is ValidationFailure;
++
++  @override
++  int get hashCode => (ValidationFailure).hashCode;
++
++  @override
++  String toString() => 'ValidationFailure($localisationKey)';
++}
++
++/// The requested record does not exist, or is soft-deleted.
++@immutable
++final class NotFoundFailure extends AppFailure {
++  /// Creates a not-found failure.
++  const NotFoundFailure();
++
++  @override
++  String get localisationKey => 'failureNotFound';
++
++  @override
++  bool operator ==(Object other) => other is NotFoundFailure;
++
++  @override
++  int get hashCode => (NotFoundFailure).hashCode;
++
++  @override
++  String toString() => 'NotFoundFailure($localisationKey)';
++}
++
++/// The operating system withheld a permission the operation needed.
++///
++/// Per the epic's rules a denial hides the control rather than leaving a
++/// broken affordance, so this exists mainly for the paths that cannot check
++/// beforehand.
++@immutable
++final class PermissionFailure extends AppFailure {
++  /// Creates a permission failure.
++  const PermissionFailure();
++
++  @override
++  String get localisationKey => 'failurePermission';
++
++  @override
++  bool operator ==(Object other) => other is PermissionFailure;
++
++  @override
++  int get hashCode => (PermissionFailure).hashCode;
++
++  @override
++  String toString() => 'PermissionFailure($localisationKey)';
++}
++
++/// Something no one anticipated happened inside a boundary.
++///
++/// This is what a `catch (error)` at a layer boundary converts an unexpected
++/// exception into, so the exception never travels outward.
++///
++/// [errorType] is a [Type], not a name and not a message, and that is the
++/// point. A `String` field here would end up holding
++/// `error.toString()` — and `SqliteException.toString()` prints its causing
++/// statement, which for the key pragma is the database key. A [Type] can carry
++/// the diagnostic value of "it was a `FileSystemException`" and nothing else.
++@immutable
++final class UnexpectedFailure extends AppFailure {
++  /// Creates an unexpected failure, optionally recording [errorType].
++  const UnexpectedFailure({this.errorType});
++
++  /// Creates an unexpected failure recording only the runtime type of [error].
++  ///
++  /// The error itself is dropped here, at the boundary, so there is no later
++  /// point at which someone can decide to render its message.
++  factory UnexpectedFailure.from(Object error) =>
++      UnexpectedFailure(errorType: error.runtimeType);
++
++  /// The type of the original error, when one is known.
++  final Type? errorType;
++
++  @override
++  String get localisationKey => 'failureUnexpected';
++
++  @override
++  bool operator ==(Object other) =>
++      other is UnexpectedFailure && other.errorType == errorType;
++
++  @override
++  int get hashCode => Object.hash(UnexpectedFailure, errorType);
++
++  @override
++  String toString() {
++    final type = errorType == null ? '' : ', errorType: $errorType';
++    return 'UnexpectedFailure($localisationKey$type)';
++  }
++}
++
++/// One instance of every [AppFailure] variant.
++///
++/// Exists so a test — and, from Story 1.3, the l10n parity check — can walk
++/// the whole hierarchy, which Dart cannot enumerate at runtime.
++///
++/// `test/core/result/app_failure_test.dart` reads this file and fails if a
++/// variant is declared above without being listed here, so the list cannot
++/// silently fall behind the hierarchy.
++const List<AppFailure> appFailureVariants = <AppFailure>[
++  StorageFailure(),
++  ValidationFailure(),
++  NotFoundFailure(),
++  PermissionFailure(),
++  UnexpectedFailure(),
++];
+diff --git a/jotno/lib/core/result/result.dart b/jotno/lib/core/result/result.dart
+new file mode 100644
+index 0000000..2c41953
+--- /dev/null
++++ b/jotno/lib/core/result/result.dart
+@@ -0,0 +1,170 @@
++import 'package:flutter/foundation.dart';
++
++/// The outcome of an operation that can fail.
++///
++/// Every layer boundary in Jotno returns one of these instead of throwing:
++/// `data` hands a [Result] to `domain`, `domain` hands one to `presentation`.
++/// An exception that escapes a repository is a defect, not a control-flow
++/// mechanism — see `AppFailure` for the failure side of the contract.
++///
++/// The type is sealed, so a `switch` over it is exhaustive and the compiler
++/// refuses to let a caller forget the failure branch:
++///
++/// ```dart
++/// switch (await repository.load(id)) {
++///   case Success(:final value):
++///     show(value);
++///   case Failure(:final failure):
++///     showMessageFor(failure.localisationKey);
++/// }
++/// ```
++///
++/// There is deliberately no `valueOrNull` and no nullable `failure` getter.
++/// Handing back `null` for "it failed" reintroduces exactly the ambiguity this
++/// type exists to remove: `null` cannot say *why*, and a caller that forgets
++/// the null check compiles. Read the value through a pattern, [fold] or
++/// [valueOr], all three of which force the failure case to be considered.
++@immutable
++sealed class Result<T, F extends Object> {
++  /// Const constructor for the two variants below.
++  const Result();
++
++  /// A successful outcome carrying [value].
++  const factory Result.success(T value) = Success<T, F>;
++
++  /// A failed outcome carrying [failure].
++  const factory Result.failure(F failure) = Failure<T, F>;
++
++  /// Whether this is a [Success].
++  bool get isSuccess;
++
++  /// Whether this is a [Failure].
++  bool get isFailure;
++
++  /// Collapses both variants to a single [R].
++  ///
++  /// Both branches are required, so a failure cannot be skipped by omission.
++  R fold<R>({
++    required R Function(T value) onSuccess,
++    required R Function(F failure) onFailure,
++  });
++
++  /// Applies [transform] to a success value, leaving a failure untouched.
++  Result<R, F> map<R>(R Function(T value) transform);
++
++  /// Chains another fallible operation onto a success value.
++  ///
++  /// The difference from [map] is that [transform] may itself fail, so the
++  /// result is not nested.
++  Result<R, F> flatMap<R>(Result<R, F> Function(T value) transform);
++
++  /// Applies [transform] to a failure, leaving a success untouched.
++  ///
++  /// Used at a layer boundary to translate a lower layer's failure into this
++  /// layer's vocabulary.
++  Result<T, G> mapFailure<G extends Object>(G Function(F failure) transform);
++
++  /// The success value, or [fallback] when this is a [Failure].
++  T valueOr(T fallback);
++}
++
++/// A [Result] that succeeded.
++@immutable
++final class Success<T, F extends Object> extends Result<T, F> {
++  /// Creates a successful result carrying [value].
++  const Success(this.value);
++
++  /// The value the operation produced.
++  final T value;
++
++  @override
++  bool get isSuccess => true;
++
++  @override
++  bool get isFailure => false;
++
++  @override
++  R fold<R>({
++    required R Function(T value) onSuccess,
++    required R Function(F failure) onFailure,
++  }) => onSuccess(value);
++
++  @override
++  Result<R, F> map<R>(R Function(T value) transform) =>
++      Success<R, F>(transform(value));
++
++  @override
++  Result<R, F> flatMap<R>(Result<R, F> Function(T value) transform) =>
++      transform(value);
++
++  @override
++  Result<T, G> mapFailure<G extends Object>(G Function(F failure) transform) =>
++      Success<T, G>(value);
++
++  @override
++  T valueOr(T fallback) => value;
++
++  @override
++  bool operator ==(Object other) =>
++      other is Success<T, F> && other.value == value;
++
++  @override
++  int get hashCode => Object.hash(Success<T, F>, value);
++
++  /// The type of the value, never the value.
++  ///
++  /// A success can be carrying a member name or a lab value, and this string
++  /// is the one part of a [Result] that could plausibly reach a log or a
++  /// console. It reports the shape of the result and nothing about its
++  /// contents, for the same reason health entities render as type and id only.
++  @override
++  String toString() => 'Success<$T>';
++}
++
++/// A [Result] that failed.
++@immutable
++final class Failure<T, F extends Object> extends Result<T, F> {
++  /// Creates a failed result carrying [failure].
++  const Failure(this.failure);
++
++  /// Why the operation failed.
++  final F failure;
++
++  @override
++  bool get isSuccess => false;
++
++  @override
++  bool get isFailure => true;
++
++  @override
++  R fold<R>({
++    required R Function(T value) onSuccess,
++    required R Function(F failure) onFailure,
++  }) => onFailure(failure);
++
++  @override
++  Result<R, F> map<R>(R Function(T value) transform) => Failure<R, F>(failure);
++
++  @override
++  Result<R, F> flatMap<R>(Result<R, F> Function(T value) transform) =>
++      Failure<R, F>(failure);
++
++  @override
++  Result<T, G> mapFailure<G extends Object>(G Function(F failure) transform) =>
++      Failure<T, G>(transform(failure));
++
++  @override
++  T valueOr(T fallback) => fallback;
++
++  @override
++  bool operator ==(Object other) =>
++      other is Failure<T, F> && other.failure == failure;
++
++  @override
++  int get hashCode => Object.hash(Failure<T, F>, failure);
++
++  /// Safe to render in full: an `AppFailure` carries a localisation key and a
++  /// type, never a message and never anything derived from user data.
++  @override
++  String toString() => 'Failure<$T>($failure)';
++}
+diff --git a/jotno/lib/main.dart b/jotno/lib/main.dart
+index 36b2603..ac9a37c 100644
+--- a/jotno/lib/main.dart
++++ b/jotno/lib/main.dart
+@@ -52,46 +52,81 @@ Future<AppDatabase> _openDatabase() async {
+ /// Raw exceptions are deliberately not carried through here.
+ /// `SqliteException.toString()` prints its causing statement, and for the key
+ /// pragma that statement *is* the key.
++///
++/// This is not an `AppFailure`, and deliberately so. These failures fire
++/// before any repository, any layer boundary or any localisation delegate
++/// exists — there is nothing for a `Result` to cross and no ARB loaded to
++/// resolve a key against, which is why [explanation] is a fixed English string
++/// this surface can always render. Each reason nevertheless carries a
++/// [localisationKey] so that when Story 1.3 wires ARB it wires one mechanism
++/// covering startup and everything after it, rather than two.
+ enum StartupFailure {
+   /// The shipped SQLite library is not the SQLite3MultipleCiphers build.
+   missingCipher(
+-    'This build shipped an unencrypted SQLite library, so your records would '
+-    'not be protected. Jotno will not open the database in that state. '
+-    'Reinstall from an official build.',
++    localisationKey: 'startupFailureMissingCipher',
++    explanation:
++        'This build shipped an unencrypted SQLite library, so your records '
++        'would not be protected. Jotno will not open the database in that '
++        'state. Reinstall from an official build.',
+   ),
+ 
+   /// The key was empty, so the database would have been left unencrypted.
+   emptyKey(
+-    'Jotno was given an empty database key, which would leave your records '
+-    'unencrypted. Jotno will not open the database in that state.',
++    localisationKey: 'startupFailureEmptyKey',
++    explanation:
++        'Jotno was given an empty database key, which would leave your '
++        'records unencrypted. Jotno will not open the database in that state.',
+   ),
+ 
+   /// A release build reached the development key provider.
+   developmentKeyInRelease(
+-    'This build uses a development key that is the same on every install. '
+-    'Jotno will not open the database in that state. Reinstall from an '
+-    'official build.',
++    localisationKey: 'startupFailureDevelopmentKeyInRelease',
++    explanation:
++        'This build uses a development key that is the same on every install. '
++        'Jotno will not open the database in that state. Reinstall from an '
++        'official build.',
+   ),
+ 
+   /// The database exists but the key does not unlock it.
+   keyRejected(
+-    'The database on this device could not be unlocked with the key '
+-    'available. Your records are still encrypted on disk and have not '
+-    'been changed.',
++    localisationKey: 'startupFailureKeyRejected',
++    explanation:
++        'The database on this device could not be unlocked with the key '
++        'available. Your records are still encrypted on disk and have not '
++        'been changed.',
+   ),
+ 
+   /// Startup did not finish in time.
+   timedOut(
+-    'Jotno could not finish starting up on this device. Nothing has been '
+-    'changed. Try opening the app again.',
++    localisationKey: 'startupFailureTimedOut',
++    explanation:
++        'Jotno could not finish starting up on this device. Nothing has been '
++        'changed. Try opening the app again.',
+   ),
+ 
+   /// Anything else — corruption, a locked file, an I/O error.
+-  unknown('The database could not be opened on this device.');
++  unknown(
++    localisationKey: 'startupFailureUnknown',
++    explanation: 'The database could not be opened on this device.',
++  );
++
++  const StartupFailure({
++    required this.localisationKey,
++    required this.explanation,
++  });
+ 
+-  const StartupFailure(this.explanation);
++  /// The ARB key naming the message for this reason, wired in Story 1.3.
++  ///
++  /// A literal constant, like every `AppFailure` key, rather than something
++  /// derived from the enum's `name`: renaming a constant or obfuscating a
++  /// release build must not change which string a reader sees.
++  final String localisationKey;
+ 
+   /// What to tell the reader. Never contains anything derived from the key.
++  ///
++  /// Stays in place after Story 1.3 as the fallback for the case that makes
++  /// this surface special: a failure this early can precede the localisations
++  /// being loaded at all.
+   final String explanation;
+ 
+   /// Maps a startup [error] onto the reason to display.
+diff --git a/jotno/test/core/logging/app_logger_test.dart b/jotno/test/core/logging/app_logger_test.dart
+new file mode 100644
+index 0000000..c2f2b95
+--- /dev/null
++++ b/jotno/test/core/logging/app_logger_test.dart
+@@ -0,0 +1,230 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/logging/analytics_events.dart';
++import 'package:jotno/core/logging/app_logger.dart';
++import 'package:jotno/core/logging/log_writer.dart';
++import 'package:jotno/core/result/app_failure.dart';
++
++import '../../support/dart_source.dart';
++
++/// A [LogWriter] that keeps what it was given, so a test can see it.
++final class RecordingLogWriter implements LogWriter {
++  final List<LogEntry> entries = <LogEntry>[];
++
++  @override
++  void write(LogEntry entry) => entries.add(entry);
++}
++
++void main() {
++  group('what gets recorded', () {
++    test('an event with no fields records just its name', () {
++      final writer = RecordingLogWriter();
++
++      AppLogger(writer: writer).event(AnalyticsEvent.appOpened);
++
++      expect(writer.entries, hasLength(1));
++      expect(formatLogEntry(writer.entries.single), 'app_opened');
++    });
++
++    test('the typed fields appear, and only the ones supplied', () {
++      final writer = RecordingLogWriter();
++
++      AppLogger(writer: writer).event(
++        AnalyticsEvent.databaseOpened,
++        count: 3,
++        elapsed: const Duration(milliseconds: 1200),
++        succeeded: true,
++      );
++
++      expect(
++        formatLogEntry(writer.entries.single),
++        'database_opened count=3 elapsed=1200ms succeeded=true',
++      );
++    });
++
++    test('a partial set of fields does not leave gaps or nulls', () {
++      final writer = RecordingLogWriter();
++
++      AppLogger(writer: writer).event(AnalyticsEvent.appOpened, count: 0);
++
++      expect(formatLogEntry(writer.entries.single), 'app_opened count=0');
++      expect(formatLogEntry(writer.entries.single), isNot(contains('null')));
++    });
++
++    test('a failure records its localisation key, never a message', () {
++      final writer = RecordingLogWriter();
++
++      AppLogger(writer: writer).event(
++        AnalyticsEvent.appStartupFailed,
++        succeeded: false,
++        failure: const StorageFailure(),
++      );
++
++      expect(
++        formatLogEntry(writer.entries.single),
++        'app_startup_failed succeeded=false failure=failureStorage',
++      );
++    });
++
++    test('an unexpected failure records the error type, not the error', () {
++      final writer = RecordingLogWriter();
++
++      AppLogger(writer: writer).event(
++        AnalyticsEvent.appStartupFailed,
++        failure: UnexpectedFailure.from(
++          StateError('opening /data/user/0/jotno.sqlite failed'),
++        ),
++      );
++
++      final line = formatLogEntry(writer.entries.single);
++      expect(
++        line,
++        'app_startup_failed failure=failureUnexpected errorType=StateError',
++      );
++      expect(line, isNot(contains('jotno.sqlite')));
++    });
++
++    test('the rendered line holds nothing beyond name and typed fields', () {
++      // Every field set at once. If a rendering branch ever grows a new source
++      // of text, this exact match is what notices.
++      expect(
++        formatLogEntry(
++          LogEntry(
++            AnalyticsEvent.databaseOpened,
++            count: 2,
++            elapsed: const Duration(seconds: 1),
++            succeeded: false,
++            failure: const NotFoundFailure(),
++          ),
++        ),
++        'database_opened count=2 elapsed=1000ms succeeded=false '
++        'failure=failureNotFound',
++      );
++    });
++  });
++
++  group('the release build writes nothing', () {
++    // The branch that matters most is the one a test can never be running in,
++    // so it is injected — the same reason `RawDatabaseOpener` is injectable in
++    // the database connection.
++    setUp(_captured.clear);
++
++    test('a release build emits no line at all', () {
++      const AppLogger(
++        writer: DeveloperLogWriter(isReleaseBuild: true, emit: _capture),
++      ).event(AnalyticsEvent.appOpened, count: 1);
++
++      expect(_captured, isEmpty);
++    });
++
++    test('a non-release build emits the rendered line', () {
++      const AppLogger(
++        writer: DeveloperLogWriter(isReleaseBuild: false, emit: _capture),
++      ).event(AnalyticsEvent.appOpened, count: 1);
++
++      expect(_captured, ['app_opened count=1']);
++    });
++  });
++
++  group('the API surface cannot accept free text', () {
++    // The guarantee is that a member name, a medication or an error message
++    // has no parameter to travel in — passing one is a compile error, so the
++    // attempt cannot be written as a test. What can be checked is the
++    // declaration: `AppLogger` is the only public entry point, and its file
++    // must mention none of the types that can carry arbitrary content.
++    final code = readPackageCode('lib/core/logging/app_logger.dart');
++
++    test('the file exists and was actually read', () {
++      expect(code, contains('class AppLogger'));
++      expect(code, contains('AnalyticsEvent event'));
++    });
++
++    for (final freeTextType in const [
++      'String',
++      'Object',
++      'dynamic',
++      'Map',
++      'List',
++      'Set',
++      'Iterable',
++      'Symbol',
++      'Function',
++      'StringBuffer',
++      'Exception',
++      'Error',
++    ]) {
++      test('mentions no $freeTextType', () {
++        expect(
++          RegExp('\\b$freeTextType\\b').hasMatch(code),
++          isFalse,
++          reason:
++              'app_logger.dart mentions $freeTextType. One free-text parameter '
++              'undoes the whole class: it will be added by someone in a hurry '
++              'who only needs to log one string this once, and a diagnosis '
++              'ends up in adb logcat. If a new dimension is genuinely needed, '
++              'add another closed-type named parameter instead.',
++        );
++      });
++    }
++
++    test('the entry it builds has no free-text field either', () {
++      // Pinned exactly, so adding a field to `LogEntry` — or to the writer —
++      // has to be a decision taken here as well as there. Text exists in that
++      // file in exactly one place: the writer's emit callback, which is fed by
++      // `formatLogEntry`, never by a caller. That declaration spans a
++      // parenthesised function type and is therefore not matched below.
++      final entryCode = readPackageCode('lib/core/logging/log_writer.dart');
++      final fields = RegExp(
++        r'^\s*final\s+([\w<>?, ]+?)\s+\w+\s*;',
++        multiLine: true,
++      ).allMatches(entryCode).map((match) => match.group(1)!.trim()).toSet();
++
++      expect(fields, {
++        'AnalyticsEvent',
++        'int?',
++        'Duration?',
++        'bool?',
++        'AppFailure?',
++        'bool',
++      });
++    });
++  });
++
++  group('the analytics allowlist', () {
++    test('event names are unique', () {
++      final names = AnalyticsEvent.values
++          .map((event) => event.eventName)
++          .toList();
++
++      expect(names.toSet(), hasLength(names.length));
++    });
++
++    test('event names are lower_snake_case literals', () {
++      // A name is the payload — it leaves the device. Constraining the shape
++      // also rules out a name assembled at runtime from something a member
++      // typed, because an interpolated name would not survive this.
++      for (final event in AnalyticsEvent.values) {
++        expect(
++          RegExp(r'^[a-z][a-z0-9]*(_[a-z0-9]+)*$').hasMatch(event.eventName),
++          isTrue,
++          reason: '${event.eventName} is not lower_snake_case',
++        );
++      }
++    });
++
++    test('a name is not derived from the Dart constant', () {
++      // Declared explicitly so an obfuscated release build reports the same
++      // string as a debug one.
++      final code = readPackageCode('lib/core/logging/analytics_events.dart');
++
++      expect(code, isNot(contains('.name')));
++      for (final event in AnalyticsEvent.values) {
++        expect(code, contains("'${event.eventName}'"));
++      }
++    });
++  });
++}
++
++/// Where [_capture] puts what it was given.
++final List<String> _captured = <String>[];
++
++void _capture(String line) => _captured.add(line);
+diff --git a/jotno/test/core/result/app_failure_test.dart b/jotno/test/core/result/app_failure_test.dart
+new file mode 100644
+index 0000000..7128e5f
+--- /dev/null
++++ b/jotno/test/core/result/app_failure_test.dart
+@@ -0,0 +1,163 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/result/app_failure.dart';
++import 'package:jotno/core/result/result.dart';
++
++import '../../support/dart_source.dart';
++
++/// The localisation keys are a contract with Story 1.3: it wires each key to
++/// an ARB entry in Bangla and English. A key that is missing, duplicated, or
++/// derived from something that can change at build time turns into a blank
++/// error message on a real device, which is the one moment the reader most
++/// needs words.
++void main() {
++  group('localisation keys', () {
++    test('every variant has a non-empty key', () {
++      for (final failure in appFailureVariants) {
++        expect(
++          failure.localisationKey,
++          isNotEmpty,
++          reason: '$failure has no localisation key',
++        );
++      }
++    });
++
++    test('every variant has a distinct key', () {
++      final keys = appFailureVariants
++          .map((failure) => failure.localisationKey)
++          .toList();
++
++      expect(
++        keys.toSet(),
++        hasLength(keys.length),
++        reason:
++            'two variants share a key, so one of them cannot be worded '
++            'differently from the other',
++      );
++    });
++
++    test('the keys are exactly the agreed strings', () {
++      // Pinned rather than computed. Story 1.3 writes these strings into the
++      // ARB files; changing one here without changing it there produces a
++      // missing translation, and this test is the thing that notices.
++      expect(
++        {
++          for (final failure in appFailureVariants)
++            failure.runtimeType.toString(): failure.localisationKey,
++        },
++        {
++          'StorageFailure': 'failureStorage',
++          'ValidationFailure': 'failureValidation',
++          'NotFoundFailure': 'failureNotFound',
++          'PermissionFailure': 'failurePermission',
++          'UnexpectedFailure': 'failureUnexpected',
++        },
++      );
++    });
++
++    test('every key is a literal in the source, not a derived name', () {
++      // `runtimeType` is unreliable in an obfuscated release build and changes
++      // under a rename, either of which would silently repoint a message.
++      final code = readPackageCode('lib/core/result/app_failure.dart');
++
++      for (final failure in appFailureVariants) {
++        expect(
++          code,
++          contains("'${failure.localisationKey}'"),
++          reason:
++              '${failure.runtimeType} does not return a literal key, so a '
++              'rename or an obfuscated build can change which string a reader '
++              'sees.',
++        );
++      }
++    });
++  });
++
++  group('the variant list covers the sealed hierarchy', () {
++    // Dart cannot enumerate a sealed hierarchy at runtime, so
++    // `appFailureVariants` is written by hand — and a hand-written list falls
++    // behind. This reads the declarations back and fails when it has.
++    test('every declared variant appears in appFailureVariants', () {
++      final code = readPackageCode('lib/core/result/app_failure.dart');
++      final declared = RegExp(
++        r'class\s+(\w+)\s+(?:extends|implements)\s+AppFailure',
++      ).allMatches(code).map((match) => match.group(1)!).toSet();
++
++      expect(
++        declared,
++        isNotEmpty,
++        reason:
++            'found no AppFailure subclasses, so this test is scanning '
++            'nothing and would pass whatever happened',
++      );
++      expect(
++        appFailureVariants
++            .map((failure) => failure.runtimeType.toString())
++            .toSet(),
++        declared,
++        reason:
++            'appFailureVariants has fallen behind the sealed hierarchy. '
++            'Add the missing variant so the key checks above and Story 1.3s '
++            'ARB coverage see it.',
++      );
++    });
++  });
++
++  group('UnexpectedFailure', () {
++    test('records the type of the original error and nothing else', () {
++      final failure = UnexpectedFailure.from(
++        StateError('database is at /data/user/0/app/jotno.sqlite'),
++      );
++
++      expect(failure.errorType, StateError);
++      expect(failure.toString(), contains('StateError'));
++      expect(failure.toString(), isNot(contains('jotno.sqlite')));
++    });
++
++    test('has no field that can hold a message', () {
++      // A `String` field here would end up holding `error.toString()`, and
++      // `SqliteException.toString()` prints its causing statement — which for
++      // the key pragma is the database key.
++      final code = readPackageCode('lib/core/result/app_failure.dart');
++
++      expect(
++        RegExp(r'\bString\b\s+\w+\s*;').hasMatch(code),
++        isFalse,
++        reason:
++            'an AppFailure declares a String field. A failure carries a '
++            'localisation key and a type, never text.',
++      );
++    });
++
++    test('two unexpected failures of the same error type are equal', () {
++      expect(
++        UnexpectedFailure.from(StateError('a')),
++        UnexpectedFailure.from(StateError('b')),
++      );
++      expect(
++        UnexpectedFailure.from(StateError('a')),
++        isNot(UnexpectedFailure.from(ArgumentError('a'))),
++      );
++    });
++  });
++
++  group('AppResult', () {
++    test('is a Result whose failure side is an AppFailure', () {
++      const AppResult<int> ok = Success(1);
++      const AppResult<int> bad = Failure(PermissionFailure());
++
++      expect(ok, isA<Result<int, AppFailure>>());
++      expect(
++        bad.fold(onSuccess: (_) => '', onFailure: (f) => f.localisationKey),
++        'failurePermission',
++      );
++    });
++  });
++
++  group('rendering', () {
++    test('a failure renders its key, never a message', () {
++      for (final failure in appFailureVariants) {
++        expect(failure.toString(), contains(failure.localisationKey));
++      }
++    });
++  });
++}
+diff --git a/jotno/test/core/result/result_test.dart b/jotno/test/core/result/result_test.dart
+new file mode 100644
+index 0000000..d854bf1
+--- /dev/null
++++ b/jotno/test/core/result/result_test.dart
+@@ -0,0 +1,248 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/result/app_failure.dart';
++import 'package:jotno/core/result/result.dart';
++
++import '../../support/dart_source.dart';
++
++/// `Result` is the shape every one of the fifty-eight remaining stories will
++/// return across a layer boundary. What is worth testing is not that a wrapper
++/// holds a value — it is the two properties that make it worth having: both
++/// branches are reachable and neither can be skipped, and there is no way to
++/// ask for a value and be handed `null` instead.
++void main() {
++  group('success', () {
++    test('carries its value and reports itself as a success', () {
++      const result = Result<int, AppFailure>.success(7);
++
++      expect(result.isSuccess, isTrue);
++      expect(result.isFailure, isFalse);
++      expect(result, isA<Success<int, AppFailure>>());
++      expect((result as Success<int, AppFailure>).value, 7);
++    });
++
++    test('is destructured by a pattern without a null check', () {
++      const Result<int, AppFailure> result = Success(7);
++
++      final int read = switch (result) {
++        Success(:final value) => value,
++        Failure() => fail('a success matched the failure branch'),
++      };
++
++      expect(read, 7);
++    });
++
++    test('fold takes the success branch', () {
++      const Result<int, AppFailure> result = Success(7);
++
++      expect(
++        result.fold(
++          onSuccess: (value) => 'ok $value',
++          onFailure: (failure) => 'no ${failure.localisationKey}',
++        ),
++        'ok 7',
++      );
++    });
++
++    test('map transforms the value and keeps the failure type', () {
++      const Result<int, AppFailure> result = Success(7);
++
++      expect(
++        result.map((value) => value * 2),
++        const Success<int, AppFailure>(14),
++      );
++    });
++
++    test('flatMap chains a second fallible step', () {
++      const Result<int, AppFailure> result = Success(7);
++
++      expect(
++        result.flatMap<int>((value) => Success<int, AppFailure>(value + 1)),
++        const Success<int, AppFailure>(8),
++      );
++      expect(
++        result.flatMap<int>(
++          (value) => const Failure<int, AppFailure>(StorageFailure()),
++        ),
++        const Failure<int, AppFailure>(StorageFailure()),
++      );
++    });
++
++    test('mapFailure leaves a success alone', () {
++      const Result<int, AppFailure> result = Success(7);
++
++      final mapped = result.mapFailure<StateError>(
++        (failure) => fail('mapFailure ran the transform on a success'),
++      );
++
++      expect(mapped, isA<Success<int, StateError>>());
++      expect((mapped as Success<int, StateError>).value, 7);
++    });
++
++    test('valueOr returns the value, not the fallback', () {
++      const Result<int, AppFailure> result = Success(7);
++
++      expect(result.valueOr(-1), 7);
++    });
++
++    test('toString reports the shape and not the value', () {
++      // A success can be carrying a member name or a lab value. The one place
++      // a `Result` could plausibly reach a console is its `toString`, so it
++      // says what kind of result this is and nothing about its contents.
++      const Result<String, AppFailure> result = Success('Rehana Begum');
++
++      expect(result.toString(), 'Success<String>');
++      expect(result.toString(), isNot(contains('Rehana')));
++    });
++  });
++
++  group('failure', () {
++    test('carries its failure and reports itself as a failure', () {
++      const result = Result<int, AppFailure>.failure(NotFoundFailure());
++
++      expect(result.isFailure, isTrue);
++      expect(result.isSuccess, isFalse);
++      expect(
++        (result as Failure<int, AppFailure>).failure,
++        isA<NotFoundFailure>(),
++      );
++    });
++
++    test('is destructured by a pattern without a null check', () {
++      const Result<int, AppFailure> result = Failure(NotFoundFailure());
++
++      final String key = switch (result) {
++        Success() => fail('a failure matched the success branch'),
++        Failure(:final failure) => failure.localisationKey,
++      };
++
++      expect(key, 'failureNotFound');
++    });
++
++    test('fold takes the failure branch', () {
++      const Result<int, AppFailure> result = Failure(StorageFailure());
++
++      expect(
++        result.fold(
++          onSuccess: (value) => 'ok $value',
++          onFailure: (failure) => 'no ${failure.localisationKey}',
++        ),
++        'no failureStorage',
++      );
++    });
++
++    test('map does not run the transform and keeps the failure', () {
++      const Result<int, AppFailure> result = Failure(StorageFailure());
++
++      final mapped = result.map<int>(
++        (value) => fail('map ran the transform on a failure'),
++      );
++
++      expect(mapped, const Failure<int, AppFailure>(StorageFailure()));
++    });
++
++    test('flatMap does not run the transform and keeps the failure', () {
++      const Result<int, AppFailure> result = Failure(StorageFailure());
++
++      final mapped = result.flatMap<int>(
++        (value) => fail('flatMap ran the transform on a failure'),
++      );
++
++      expect(mapped, const Failure<int, AppFailure>(StorageFailure()));
++    });
++
++    test('mapFailure translates a lower layer failure into this layer', () {
++      const Result<int, AppFailure> result = Failure(StorageFailure());
++
++      final mapped = result.mapFailure<AppFailure>(
++        (failure) => const UnexpectedFailure(),
++      );
++
++      expect(mapped, const Failure<int, AppFailure>(UnexpectedFailure()));
++    });
++
++    test('valueOr returns the fallback', () {
++      const Result<int, AppFailure> result = Failure(StorageFailure());
++
++      expect(result.valueOr(-1), -1);
++    });
++
++    test('toString renders the failure, which carries no message', () {
++      const Result<int, AppFailure> result = Failure(StorageFailure());
++
++      expect(result.toString(), 'Failure<int>(StorageFailure(failureStorage))');
++    });
++  });
++
++  group('equality', () {
++    test('successes are equal when their values are', () {
++      expect(
++        const Success<int, AppFailure>(7),
++        const Success<int, AppFailure>(7),
++      );
++      expect(
++        const Success<int, AppFailure>(7),
++        isNot(const Success<int, AppFailure>(8)),
++      );
++    });
++
++    test('failures are equal when their failures are', () {
++      expect(
++        const Failure<int, AppFailure>(StorageFailure()),
++        const Failure<int, AppFailure>(StorageFailure()),
++      );
++      expect(
++        const Failure<int, AppFailure>(StorageFailure()),
++        isNot(const Failure<int, AppFailure>(NotFoundFailure())),
++      );
++    });
++
++    test('a success is never equal to a failure', () {
++      expect(
++        const Success<int, AppFailure>(7),
++        isNot(const Failure<int, AppFailure>(StorageFailure())),
++      );
++    });
++  });
++
++  group('no path yields null', () {
++    // The guarantee is a type-level one: there is no `valueOrNull`, no
++    // nullable `failure` getter, and no member declared to return `T?` or
++    // `F?`. A caller therefore cannot receive `null` and cannot forget to
++    // check for it, which is the ambiguity the type exists to remove.
++    //
++    // This cannot be asserted by calling the code — the offending call would
++    // not compile — so it is asserted against the declaration.
++    final code = readPackageCode('lib/core/result/result.dart');
++
++    test('declares no nullable value or failure type', () {
++      expect(
++        RegExp(r'\bT\?').hasMatch(code),
++        isFalse,
++        reason:
++            'result.dart declares a nullable success value. Handing back null '
++            'for "it failed" reintroduces the ambiguity Result removes: null '
++            'cannot say why, and a caller that forgets the check compiles.',
++      );
++      expect(
++        RegExp(r'\bF\?').hasMatch(code),
++        isFalse,
++        reason: 'result.dart declares a nullable failure type.',
++      );
++    });
++
++    test('declares none of the usual nullable escape hatches', () {
++      for (final escapeHatch in const [
++        'valueOrNull',
++        'failureOrNull',
++        'getOrNull',
++        'errorOrNull',
++      ]) {
++        expect(
++          code,
++          isNot(contains(escapeHatch)),
++          reason: '$escapeHatch reintroduces nullable unwrapping.',
++        );
++      }
++    });
++  });
++}
+diff --git a/jotno/test/startup_surface_test.dart b/jotno/test/startup_surface_test.dart
+index 9c11aaa..b452492 100644
+--- a/jotno/test/startup_surface_test.dart
++++ b/jotno/test/startup_surface_test.dart
+@@ -1,3 +1,5 @@
++import 'dart:io';
++
+ import 'package:flutter/material.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:jotno/core/database/connection.dart';
+@@ -120,6 +122,48 @@ void main() {
+     });
+   });
+ 
++  group('the localisation keys', () {
++    // Startup failures are not `AppFailure`s — they fire before any layer
++    // boundary exists — but they carry keys in the same form so Story 1.3
++    // wires one mechanism rather than two. These checks mirror the ones in
++    // `test/core/result/app_failure_test.dart` on purpose.
++    test('every reason has a non-empty key', () {
++      for (final reason in StartupFailure.values) {
++        expect(reason.localisationKey.trim(), isNotEmpty, reason: '$reason');
++      }
++    });
++
++    test('every reason has a distinct key', () {
++      final keys = StartupFailure.values
++          .map((reason) => reason.localisationKey)
++          .toList();
++
++      expect(keys.toSet(), hasLength(keys.length));
++    });
++
++    test('the keys are literals, not derived from the enum name', () {
++      // `name` is stripped by obfuscation and changes under a rename, either
++      // of which would silently repoint a message once ARB is wired.
++      final source = File('lib/main.dart').readAsStringSync();
++
++      for (final reason in StartupFailure.values) {
++        expect(source, contains("'${reason.localisationKey}'"));
++      }
++    });
++
++    test('a key never contains anything derived from a database key', () {
++      for (final reason in StartupFailure.values) {
++        expect(
++          RegExp(r'^[a-zA-Z][a-zA-Z0-9]*$').hasMatch(reason.localisationKey),
++          isTrue,
++          reason:
++              '${reason.localisationKey} is not a plain identifier, so it was '
++              'not written as a fixed constant',
++        );
++      }
++    });
++  });
++
+   group('the failure text', () {
+     test('never carries a key, even for a real SqliteException', () {
+       // Walks the whole path: a SqliteException whose causing statement holds
+diff --git a/jotno/test/support/dart_source.dart b/jotno/test/support/dart_source.dart
+new file mode 100644
+index 0000000..e80798a
+--- /dev/null
++++ b/jotno/test/support/dart_source.dart
+@@ -0,0 +1,59 @@
++import 'dart:io';
++
++/// Reading a library's own source back in a test.
++///
++/// Two of this story's guarantees are about what a *signature* cannot express
++/// — `AppLogger` has no parameter that can carry free text, `Result` has no
++/// member that can yield null — and one is about a hierarchy Dart cannot
++/// enumerate at runtime. None of them can be asserted by calling the code:
++/// the whole point is that the offending call would not compile, so it cannot
++/// be written in a test either.
++///
++/// Reading the declaration is the honest way to check a declaration. It is
++/// coarse, and it is deliberately coarse: a test that fails when someone adds
++/// `Map<String, Object?> extras` is worth more than no test at all, and the
++/// failure message points straight at the line that did it.
++
++/// Loads a file by its path relative to the package root.
++///
++/// `flutter test` runs with the package root as the working directory. If that
++/// ever stops being true this throws rather than silently passing on an empty
++/// string.
++String readPackageSource(String relativePath) {
++  final file = File(relativePath);
++  if (!file.existsSync()) {
++    throw StateError(
++      'expected to find $relativePath relative to ${Directory.current.path}. '
++      'These tests read source files to check declarations, so a wrong '
++      'working directory must fail loudly rather than scan nothing.',
++    );
++  }
++  return file.readAsStringSync();
++}
++
++/// Strips `//` and `/* */` comments from [source].
++///
++/// Prose in a dartdoc mentions the very words these checks look for — this
++/// file says "String" several times — so the comments have to go before
++/// anything is searched.
++///
++/// Caveat: a `//` inside a string literal truncates that line. None of the
++/// files checked here contain one, and a test failing loudly is the acceptable
++/// outcome if one is ever added.
++String withoutComments(String source) {
++  final withoutBlockComments = source.replaceAll(
++    RegExp(r'/\*.*?\*/', dotAll: true),
++    '',
++  );
++  return withoutBlockComments
++      .split('\n')
++      .map((line) {
++        final commentStart = line.indexOf('//');
++        return commentStart == -1 ? line : line.substring(0, commentStart);
++      })
++      .join('\n');
++}
++
++/// The code of [relativePath] with its comments removed.
++String readPackageCode(String relativePath) =>
++    withoutComments(readPackageSource(relativePath));
+diff --git a/jotno/test/tool/no_print_gate_test.dart b/jotno/test/tool/no_print_gate_test.dart
+new file mode 100644
+index 0000000..2e74b04
+--- /dev/null
++++ b/jotno/test/tool/no_print_gate_test.dart
+@@ -0,0 +1,119 @@
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++
++/// A gate nobody has watched fail is not a gate.
++///
++/// This runs `tool/no_print_gate.sh` — the same script CI runs — against
++/// deliberately offending files and asserts that it fails and names the file
++/// and line. It also runs it against the real `lib/`, so the suite fails the
++/// moment a console call lands there, rather than waiting for CI.
++///
++/// The script takes its scan roots as arguments precisely so this test can
++/// point it at a temporary directory instead of the repository.
++void main() {
++  const gate = 'tool/no_print_gate.sh';
++
++  late Directory scratch;
++
++  setUp(() {
++    scratch = Directory.systemTemp.createTempSync('no_print_gate');
++  });
++
++  tearDown(() {
++    if (scratch.existsSync()) {
++      scratch.deleteSync(recursive: true);
++    }
++  });
++
++  Future<ProcessResult> runGate(List<String> roots) =>
++      Process.run('bash', [gate, ...roots]);
++
++  void writeDart(String name, String contents) {
++    File('${scratch.path}/$name').writeAsStringSync(contents);
++  }
++
++  test('the real lib/ passes', () async {
++    final result = await Process.run('bash', [gate]);
++
++    expect(
++      result.exitCode,
++      0,
++      reason:
++          'lib/ contains a direct console call.\n'
++          '${result.stdout}${result.stderr}',
++    );
++  });
++
++  test('a print fails the gate and names the file and line', () async {
++    writeDart('offender.dart', '''
++void doSomething() {
++  final name = 'Rehana Begum';
++  ${'print'}(name);
++}
++''');
++
++    final result = await Process.run('bash', [gate, scratch.path]);
++    final output = '${result.stdout}${result.stderr}';
++
++    expect(result.exitCode, 1);
++    expect(output, contains('offender.dart'));
++    expect(output, contains('offender.dart:3'));
++  });
++
++  test('a debugPrint fails the gate too', () async {
++    // `avoid_print` in the analyzer covers `print` and says nothing about
++    // `debugPrint`, which writes to exactly the same device log. That gap is
++    // the reason this gate exists alongside `flutter analyze`.
++    writeDart('offender.dart', 'void f() { ${'debugPrint'}("metformin"); }\n');
++
++    final result = await runGate([scratch.path]);
++
++    expect(result.exitCode, 1);
++    expect('${result.stdout}', contains('offender.dart:1'));
++  });
++
++  test('a clean file passes', () async {
++    writeDart('clean.dart', 'int add(int a, int b) => a + b;\n');
++
++    final result = await runGate([scratch.path]);
++
++    expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
++  });
++
++  test('words merely containing print do not trip it', () async {
++    // A gate that cries wolf gets commented out. `sprint`, `blueprint` and a
++    // method named `print` on someone's own object are all legitimate.
++    writeDart('lookalikes.dart', '''
++int sprint(int a) => a;
++int blueprint(int a) => a;
++void f(Printer p) { p.print(1); }
++''');
++
++    final result = await runGate([scratch.path]);
++
++    expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
++  });
++
++  test('a missing scan root fails rather than passing blind', () async {
++    // The failure mode the two existing gates in ci.yaml are also written to
++    // avoid: grep exits >= 2 on an unreadable path, and a naive gate reads
++    // that as "found nothing, all clear".
++    final result = await runGate(['${scratch.path}/does-not-exist']);
++
++    expect(result.exitCode, 1);
++    expect('${result.stdout}', contains('would be blind'));
++  });
++
++  test('every offending line is named, not just the first', () async {
++    writeDart('first.dart', 'void a() { ${'print'}(1); }\n');
++    writeDart('second.dart', 'void b() { ${'print'}(2); }\n');
++
++    final result = await runGate([scratch.path]);
++    final output = '${result.stdout}';
++
++    expect(result.exitCode, 1);
++    expect(output, contains('first.dart:1'));
++    expect(output, contains('second.dart:1'));
++  });
++}
+diff --git a/jotno/tool/no_print_gate.sh b/jotno/tool/no_print_gate.sh
+new file mode 100755
+index 0000000..a15c05e
+--- /dev/null
++++ b/jotno/tool/no_print_gate.sh
+@@ -0,0 +1,68 @@
++#!/usr/bin/env bash
++#
++# The logging gate: no direct `print` or `debugPrint` anywhere under `lib/`.
++#
++# Jotno holds medical records. A console call is a free-text channel straight
++# into `adb logcat` and the iOS device console, where anyone with a cable — a
++# repair shop, a border officer, a curious relative — can read it, and where
++# nothing in the app can redact it afterwards. `AppLogger`
++# (`lib/core/logging/app_logger.dart`) has no parameter that can carry text, so
++# it cannot be used to leak one. This gate closes the alternative.
++#
++# It is a script rather than an inline CI step so a developer can run exactly
++# what CI runs, and so the accompanying test can prove it fails on a real
++# offending file instead of assuming it would.
++#
++# Usage:
++#   tool/no_print_gate.sh              # scans lib/
++#   tool/no_print_gate.sh path [...]   # scans the given roots (used by tests)
++set -euo pipefail
++
++if [ "$#" -gt 0 ]; then
++  roots=("$@")
++else
++  roots=("lib")
++fi
++
++# A missing root would make the scan blind while still exiting 0. Refuse.
++for root in "${roots[@]}"; do
++  if [ ! -e "$root" ]; then
++    echo "::error::expected $root to exist; the print scan would be blind"
++    exit 1
++  fi
++done
++
++# The leading class excludes `sprint(`, `blueprint(`, `footprint(` and any
++# `something.print(` — a method named `print` on an object is that object's
++# business, not a console write. `debugPrintStack` is caught by the same
++# alternation only when written as a call to `debugPrint`, which is the intent:
++# the forbidden thing is the console, not the word.
++pattern='(^|[^A-Za-z0-9_$.])(print|debugPrint)[[:space:]]*\('
++
++# grep exits 0 on a match, 1 on no match, and >=2 on an error such as an
++# unreadable path. Only 1 is success — treating >=2 as "clean" would let the
++# gate pass while scanning nothing, which is the failure mode the two existing
++# gates in ci.yaml are also written to avoid.
++matches=$(grep -R -n -E --include='*.dart' "$pattern" "${roots[@]}") && status=0 || status=$?
++
++case "$status" in
++  0)
++    while IFS= read -r match; do
++      [ -n "$match" ] || continue
++      file=${match%%:*}
++      rest=${match#*:}
++      line=${rest%%:*}
++      echo "::error file=$file,line=$line::direct print/debugPrint is forbidden here; record events through AppLogger (lib/core/logging/app_logger.dart), which cannot carry health data"
++      echo "$file:$line: direct print/debugPrint"
++    done <<<"$matches"
++    echo "::error::the logging gate failed: see the file and line above"
++    exit 1
++    ;;
++  1)
++    echo "logging gate: no direct print/debugPrint under ${roots[*]}"
++    ;;
++  *)
++    echo "::error::grep failed with exit status $status"
++    exit 1
++    ;;
++esac
