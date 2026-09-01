@@ -52,46 +52,81 @@ Future<AppDatabase> _openDatabase() async {
 /// Raw exceptions are deliberately not carried through here.
 /// `SqliteException.toString()` prints its causing statement, and for the key
 /// pragma that statement *is* the key.
+///
+/// This is not an `AppFailure`, and deliberately so. These failures fire
+/// before any repository, any layer boundary or any localisation delegate
+/// exists — there is nothing for a `Result` to cross and no ARB loaded to
+/// resolve a key against, which is why [explanation] is a fixed English string
+/// this surface can always render. Each reason nevertheless carries a
+/// [localisationKey] so that when Story 1.3 wires ARB it wires one mechanism
+/// covering startup and everything after it, rather than two.
 enum StartupFailure {
   /// The shipped SQLite library is not the SQLite3MultipleCiphers build.
   missingCipher(
-    'This build shipped an unencrypted SQLite library, so your records would '
-    'not be protected. Jotno will not open the database in that state. '
-    'Reinstall from an official build.',
+    localisationKey: 'startupFailureMissingCipher',
+    explanation:
+        'This build shipped an unencrypted SQLite library, so your records '
+        'would not be protected. Jotno will not open the database in that '
+        'state. Reinstall from an official build.',
   ),
 
   /// The key was empty, so the database would have been left unencrypted.
   emptyKey(
-    'Jotno was given an empty database key, which would leave your records '
-    'unencrypted. Jotno will not open the database in that state.',
+    localisationKey: 'startupFailureEmptyKey',
+    explanation:
+        'Jotno was given an empty database key, which would leave your '
+        'records unencrypted. Jotno will not open the database in that state.',
   ),
 
   /// A release build reached the development key provider.
   developmentKeyInRelease(
-    'This build uses a development key that is the same on every install. '
-    'Jotno will not open the database in that state. Reinstall from an '
-    'official build.',
+    localisationKey: 'startupFailureDevelopmentKeyInRelease',
+    explanation:
+        'This build uses a development key that is the same on every install. '
+        'Jotno will not open the database in that state. Reinstall from an '
+        'official build.',
   ),
 
   /// The database exists but the key does not unlock it.
   keyRejected(
-    'The database on this device could not be unlocked with the key '
-    'available. Your records are still encrypted on disk and have not '
-    'been changed.',
+    localisationKey: 'startupFailureKeyRejected',
+    explanation:
+        'The database on this device could not be unlocked with the key '
+        'available. Your records are still encrypted on disk and have not '
+        'been changed.',
   ),
 
   /// Startup did not finish in time.
   timedOut(
-    'Jotno could not finish starting up on this device. Nothing has been '
-    'changed. Try opening the app again.',
+    localisationKey: 'startupFailureTimedOut',
+    explanation:
+        'Jotno could not finish starting up on this device. Nothing has been '
+        'changed. Try opening the app again.',
   ),
 
   /// Anything else — corruption, a locked file, an I/O error.
-  unknown('The database could not be opened on this device.');
+  unknown(
+    localisationKey: 'startupFailureUnknown',
+    explanation: 'The database could not be opened on this device.',
+  );
 
-  const StartupFailure(this.explanation);
+  const StartupFailure({
+    required this.localisationKey,
+    required this.explanation,
+  });
+
+  /// The ARB key naming the message for this reason, wired in Story 1.3.
+  ///
+  /// A literal constant, like every `AppFailure` key, rather than something
+  /// derived from the enum's `name`: renaming a constant or obfuscating a
+  /// release build must not change which string a reader sees.
+  final String localisationKey;
 
   /// What to tell the reader. Never contains anything derived from the key.
+  ///
+  /// Stays in place after Story 1.3 as the fallback for the case that makes
+  /// this surface special: a failure this early can precede the localisations
+  /// being loaded at all.
   final String explanation;
 
   /// Maps a startup [error] onto the reason to display.

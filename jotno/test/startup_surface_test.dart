@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jotno/core/database/connection.dart';
@@ -116,6 +118,48 @@ void main() {
     testWidgets('no reason renders an empty explanation', (tester) async {
       for (final reason in StartupFailure.values) {
         expect(reason.explanation.trim(), isNotEmpty);
+      }
+    });
+  });
+
+  group('the localisation keys', () {
+    // Startup failures are not `AppFailure`s — they fire before any layer
+    // boundary exists — but they carry keys in the same form so Story 1.3
+    // wires one mechanism rather than two. These checks mirror the ones in
+    // `test/core/result/app_failure_test.dart` on purpose.
+    test('every reason has a non-empty key', () {
+      for (final reason in StartupFailure.values) {
+        expect(reason.localisationKey.trim(), isNotEmpty, reason: '$reason');
+      }
+    });
+
+    test('every reason has a distinct key', () {
+      final keys = StartupFailure.values
+          .map((reason) => reason.localisationKey)
+          .toList();
+
+      expect(keys.toSet(), hasLength(keys.length));
+    });
+
+    test('the keys are literals, not derived from the enum name', () {
+      // `name` is stripped by obfuscation and changes under a rename, either
+      // of which would silently repoint a message once ARB is wired.
+      final source = File('lib/main.dart').readAsStringSync();
+
+      for (final reason in StartupFailure.values) {
+        expect(source, contains("'${reason.localisationKey}'"));
+      }
+    });
+
+    test('a key never contains anything derived from a database key', () {
+      for (final reason in StartupFailure.values) {
+        expect(
+          RegExp(r'^[a-zA-Z][a-zA-Z0-9]*$').hasMatch(reason.localisationKey),
+          isTrue,
+          reason:
+              '${reason.localisationKey} is not a plain identifier, so it was '
+              'not written as a fixed constant',
+        );
       }
     });
   });
