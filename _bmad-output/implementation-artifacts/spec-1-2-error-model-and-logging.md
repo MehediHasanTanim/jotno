@@ -2,7 +2,7 @@
 title: 'Story 1.2 — The error model and logging every feature is required to use'
 type: 'feature'
 created: '2026-09-01'
-status: 'in-review'
+status: 'done'
 baseline_commit: 'b33dd53ccfc01cb9ff9567a933e0aaf79c467edc'
 review_loop_iteration: 0
 context:
