@@ -35,3 +35,19 @@
 - source_spec: `spec-1-1-encrypted-database.md`
   summary: On Android, a build that ships upstream SQLite instead of SQLite3MultipleCiphers hangs on a black screen rather than rendering the cipher error.
   evidence: Reproduced on a Motorola edge 50 fusion (Android 16) in debug, profile and release. Three facts locate it below Dart. The 30-second startup watchdog never fires, so the isolate's event loop is blocked — a Dart timer cannot run. `/proc/<pid>/maps` shows no SQLite library mapped at all, so the code asset never loaded (this refutes the soname-collision hypothesis: it is not that the wrong SQLite loaded, it is that none did). And the eager-verification refactor, which removed drift and LazyDatabase from the fail-closed path entirely, did not change the symptom. iOS renders the error correctly, so it is Android-specific. Data safety is unaffected — no database opens and nothing is written in plaintext. What is lost is the explanation: the user sees a black screen instead of being told the build is broken. The shipping configuration is verified working on-device, and the CI encryption-switch gate blocks the broken configuration before it can ship, so this is a defence-in-depth gap rather than an exposure. Fixing it needs investigation at the `package:sqlite3` code-asset loading layer, likely with an upstream issue.
+
+- source_spec: none
+  summary: `HeadlessScope` — a container that non-widget entry points (notification action handler, boot receiver, WorkManager callback) use to reach repositories.
+  evidence: Split from Story 1.2, which bundled six independently shippable foundations. AD-16 makes this the only permitted path for reaching repositories outside the widget tree; Story 2.4's dose logging is its first consumer, so it must land before Epic 2.
+
+- source_spec: none
+  summary: `AttachmentStore` — sole owner of attachment paths and the only code permitted to delete attachment files.
+  evidence: Split from Story 1.2. AD-12 forbids storing binary content in database columns and makes this the single writer. Story 1.10 (medical history documents) and 1.8 (member photo) are its first consumers, so it must land before them.
+
+- source_spec: none
+  summary: The three aggregator contributor interfaces — `TimelineContributor`, `CalendarContributor`, `SummaryContributor`.
+  evidence: Split from Story 1.2. AD-23 requires each aggregator to declare a contract that source features implement, so the aggregator never imports a feature. Pure interfaces, but they must exist before any feature that contributes to a timeline, calendar or PDF is built.
+
+- source_spec: none
+  summary: The reference dataset fixture and the NFR-P benchmark harness.
+  evidence: Split from Story 1.2. AD-27 requires the fixture (10 members, 20 years, 10,000 measurements, 10,000 medication logs, 5,000 documents, 500 appointments) to exist as a committed test artifact with benchmarks running against it in CI, otherwise the nine performance budgets are unmeasurable. Needed before any story whose acceptance criteria cite reference-size performance — Story 1.12 is the first.
