@@ -51,17 +51,21 @@ class AppDatabase extends _$AppDatabase {
 
 /// Opens the encrypted Jotno database.
 ///
-/// Nothing here validates the cipher — that happens in the connection `setup`
-/// callback, before any statement this class issues.
+/// The cipher and the key are proven eagerly, in awaited code, before this
+/// returns — see [verifyEncryptedDatabaseFile]. A failure therefore reaches the
+/// caller's `catch` as itself, rather than depending on drift to surface an
+/// error raised inside a lazily-invoked opener.
 Future<AppDatabase> openAppDatabase({
   DatabaseKeyProvider keyProvider = const DevelopmentKeyProvider(),
   Future<Object> Function()? databaseDirectory,
   Future<Object> Function()? temporaryDirectory,
+  RawDatabaseOpener openRaw = openRawDatabase,
 }) async {
   final executor = await openEncryptedDatabase(
     keyProvider: keyProvider,
     databaseDirectory: databaseDirectory,
     temporaryDirectory: temporaryDirectory,
+    openRaw: openRaw,
   );
   return AppDatabase(executor);
 }

@@ -489,9 +489,9 @@ void main() {
     // which has no implementation under `flutter test`.
     Future<Object> testDirectory() async => tempDir;
 
-    AppDatabase open(String key) {
+    Future<AppDatabase> open(String key) async {
       return AppDatabase(
-        encryptedDatabaseConnection(
+        await encryptedDatabaseConnection(
           key,
           databaseDirectory: testDirectory,
           temporaryDirectory: testDirectory,
@@ -500,7 +500,7 @@ void main() {
     }
 
     test('creates an encrypted file in the resolved directory', () async {
-      final database = open('a-plain-key');
+      final database = await open('a-plain-key');
       var closed = false;
       addTearDown(() async {
         if (!closed) await _closeQuietly(database);
@@ -514,48 +514,35 @@ void main() {
     });
 
     test('a wrong key still reaches startup as a named failure', () async {
-      final database = open('the-right-key');
+      final database = await open('the-right-key');
       await _insertSmokeRow(database, '0199a0c8-0000-7000-8000-000000000005');
       await database.close();
 
-      final reopened = open('the-wrong-key');
-      addTearDown(() => _closeQuietly(reopened));
-
+      // The connection lives on a background isolate, but the cipher and key
+      // are proven eagerly on the calling isolate, so the failure arrives from
+      // the awaited open itself — unwrapped, and still distinguishable from a
+      // build that shipped upstream SQLite.
       Object? caught;
       try {
-        await reopened.select(reopened.smokeRecords).get();
+        await open('the-wrong-key');
       } on Object catch (error) {
         caught = error;
       }
 
-      // The connection lives on a background isolate, but the cipher and key
-      // are proven on the calling isolate first, so startup sees the failure
-      // unwrapped and can still tell a bad key from a build that shipped
-      // upstream SQLite.
       expect(caught, isA<DatabaseKeyRejectedException>());
     });
 
-    test('an empty key is refused before any file is written', () async {
-      final database = open('   ');
-      addTearDown(() => _closeQuietly(database));
-
-      await expectLater(
-        database.select(database.smokeRecords).get(),
-        throwsA(isA<EmptyDatabaseKeyError>()),
-      );
-      // P6: a failed attempt must not leave a zero-byte file behind, because
-      // an empty file passes a "not plaintext" check for free.
+    test('an empty key is refused while opening, not on first query', () async {
+      // The refusal must arrive from the awaited open itself, so it lands in
+      // main's try/catch rather than depending on a later query to surface it.
+      await expectLater(open('   '), throwsA(isA<EmptyDatabaseKeyError>()));
+      // A failed attempt must not leave a zero-byte file behind, because an
+      // empty file passes a "not plaintext" check for free.
       expect(dbFile.existsSync(), isFalse);
     });
 
     test('a failed open leaves no zero-byte file behind', () async {
-      final database = open('   ');
-      addTearDown(() => _closeQuietly(database));
-
-      await expectLater(
-        database.select(database.smokeRecords).get(),
-        throwsA(isA<EmptyDatabaseKeyError>()),
-      );
+      await expectLater(open('   '), throwsA(isA<EmptyDatabaseKeyError>()));
 
       expect(
         Directory(tempDir.path).listSync().map((e) => e.path),
@@ -600,23 +587,14 @@ void main() {
       await _insertSmokeRow(database, '0199a0c8-0000-7000-8000-000000000007');
       await database.close();
 
-      final reopened = await open('a-different-key');
-      addTearDown(() => _closeQuietly(reopened));
-
       await expectLater(
-        reopened.select(reopened.smokeRecords).get(),
+        open('a-different-key'),
         throwsA(isA<DatabaseKeyRejectedException>()),
       );
     });
 
-    test('an empty provider key is refused', () async {
-      final database = await open('');
-      addTearDown(() => _closeQuietly(database));
-
-      await expectLater(
-        database.select(database.smokeRecords).get(),
-        throwsA(isA<EmptyDatabaseKeyError>()),
-      );
+    test('an empty provider key is refused while opening', () async {
+      await expectLater(open(''), throwsA(isA<EmptyDatabaseKeyError>()));
     });
   });
 

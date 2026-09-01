@@ -1,24 +1,49 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'core/database/app_database.dart';
 import 'core/database/connection.dart';
 import 'core/database/database_key.dart';
 
+/// How long startup may take before the app gives up and says so.
+///
+/// Deliberately far beyond any plausible cold start (the NFR floor is three
+/// seconds on a 2GB Android 10 device). It exists so a stall can never present
+/// as a black screen with no explanation, which is what an unencrypted build
+/// did on Android before the check below was made eager.
+///
+/// It cannot rescue a *synchronous* native call that blocks — that wedges the
+/// isolate and no timer fires. It covers the awaited work: reading the key,
+/// resolving directories over platform channels, and drift's own open.
+const Duration startupTimeout = Duration(seconds: 30);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    final database = await openAppDatabase();
-    // The connection is lazy: the cipher check and `PRAGMA key` run on first
-    // use. Force that now so an unencrypted build fails at startup rather than
-    // on whichever screen happens to read first.
-    await database.customSelect('select 1').get();
+    final database = await _openDatabase().timeout(startupTimeout);
     runApp(JotnoApp(database: database));
+  } on TimeoutException {
+    runApp(const DatabaseUnavailableApp(reason: StartupFailure.timedOut));
   } on Object catch (error) {
     // A database that cannot be opened encrypted is not a recoverable state.
-    // Show why, on screen, instead of a white rectangle.
+    // Show why, on screen, instead of a black rectangle.
     runApp(DatabaseUnavailableApp(reason: StartupFailure.classify(error)));
   }
+}
+
+/// Opens the database and proves it is usable.
+///
+/// `openAppDatabase` has already verified the cipher and the key in plain
+/// awaited code, so a failure has arrived by the time it returns. The warm-up
+/// query then forces drift's own connection open, so any failure there also
+/// happens here — inside `main`'s `try` — rather than on whichever screen
+/// happens to read first.
+Future<AppDatabase> _openDatabase() async {
+  final database = await openAppDatabase();
+  await database.customSelect('select 1').get();
+  return database;
 }
 
 /// Why the database could not be opened, in terms the startup surface can
@@ -53,6 +78,12 @@ enum StartupFailure {
     'The database on this device could not be unlocked with the key '
     'available. Your records are still encrypted on disk and have not '
     'been changed.',
+  ),
+
+  /// Startup did not finish in time.
+  timedOut(
+    'Jotno could not finish starting up on this device. Nothing has been '
+    'changed. Try opening the app again.',
   ),
 
   /// Anything else — corruption, a locked file, an I/O error.

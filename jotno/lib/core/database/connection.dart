@@ -149,17 +149,118 @@ void configureEncryptedDatabase(CommonDatabase db, String key) {
   // above it.
 }
 
+/// Opens a raw sqlite3 handle on [path].
+///
+/// Injectable only so the fail-closed verification below can be driven against
+/// a library that lacks the cipher, which cannot otherwise be simulated on a
+/// host where the correct library is installed.
+typedef RawDatabaseOpener = CommonDatabase Function(String path);
+
+/// The real opener: a plain sqlite3 handle on [path].
+CommonDatabase openRawDatabase(String path) => sqlite3.open(path);
+
+/// Resolves the database file, creating its directory if needed.
+///
+/// [databaseDirectory] may return a [Directory] or a path [String] and
+/// defaults to the app-support directory.
+Future<File> resolveDatabaseFile({
+  Future<Object> Function()? databaseDirectory,
+}) async {
+  final directoryPath = _asPath(
+    await (databaseDirectory ?? getApplicationSupportDirectory)(),
+    'databaseDirectory',
+  );
+
+  final directory = Directory(directoryPath);
+  if (!directory.existsSync()) {
+    await directory.create(recursive: true);
+  }
+
+  return File('$directoryPath/$databaseFileName.sqlite');
+}
+
+/// Points sqlite3 at a temporary directory the app owns, and returns its path.
+///
+/// sqlite3 spills large intermediate results to a temporary directory, and the
+/// global `/tmp` is unreachable from a sandboxed app on some platforms.
+Future<String> configureSqliteTempDirectory({
+  Future<Object> Function()? temporaryDirectory,
+}) async {
+  final tempPath = _asPath(
+    await (temporaryDirectory ?? getTemporaryDirectory)(),
+    'temporaryDirectory',
+  );
+  sqlite3.tempDirectory = tempPath;
+  return tempPath;
+}
+
+/// Proves, synchronously and before any drift object exists, that the shipped
+/// library is encrypted and the key unlocks [file].
+///
+/// **This is the fail-closed gate.** It is deliberately plain, synchronous code
+/// running on the calling isolate: no drift, no `LazyDatabase`, no background
+/// isolate, no future chain that anything could swallow. Whatever it throws
+/// lands in the caller's `try`/`catch` with its type intact.
+///
+/// It exists because an unencrypted build left the app on a black screen with
+/// no error on Android — debug and release both — when the check ran inside a
+/// `LazyDatabase` opener and startup depended on drift surfacing the throw.
+///
+/// The mechanism was never pinned down, and `LazyDatabase` is probably not the
+/// culprit: it forwards opener errors correctly
+/// (`onError: delegate.completeError`), the same lazy arrangement propagates
+/// the throw on the host — with directories injected *and* with a mocked
+/// `path_provider` channel — and the same code renders the error surface
+/// correctly on an iOS device artifact. The hang did not reproduce anywhere
+/// except Android hardware.
+///
+/// One Android-specific hazard fits: with `source: sqlite3` the bundled
+/// library is `libsqlite3.so`, the same soname as Android's own system SQLite,
+/// which is already loaded in every app process. What `dlopen` returns there
+/// is not guaranteed to be the bundled build. `sqlite3mc` has a unique soname
+/// and no such collision — so the hazard exists only in the misconfiguration
+/// this check is here to catch.
+///
+/// Whatever the mechanism, the fail-closed guarantee must not depend on it.
+/// Do not move this check back behind a drift abstraction, and do not assume an
+/// exception raised inside one will reach `main`.
+///
+/// Note the limit: this cannot rescue a native call that blocks rather than
+/// returning. If Android is wedging inside the library itself, this wedges too
+/// — just earlier and before any data is touched.
+///
+/// `sqlite3.open` creates the file before the check can run, so a failed
+/// attempt would leave a zero-byte file behind — and a zero-byte file passes a
+/// "does not start with the plaintext header" check for free. Remove it again
+/// if it did not exist before this attempt.
+void verifyEncryptedDatabaseFile(
+  File file,
+  String key, {
+  RawDatabaseOpener openRaw = openRawDatabase,
+}) {
+  final existedBefore = file.existsSync();
+  final probe = openRaw(file.path);
+  try {
+    configureEncryptedDatabase(probe, key);
+  } on Object {
+    probe.close();
+    if (!existedBefore && file.existsSync() && file.lengthSync() == 0) {
+      file.deleteSync();
+    }
+    rethrow;
+  }
+  probe.close();
+}
+
 /// Opens the Jotno database with an already-resolved [key].
 ///
-/// The returned connection is lazy; the cipher check and key application run
-/// when the connection is first used.
+/// Everything asynchronous — resolving directories, reading the key — happens
+/// here, awaited, before the connection is built. The fail-closed check then
+/// runs synchronously via [verifyEncryptedDatabaseFile]. The returned executor
+/// is therefore already proven, and no `LazyDatabase` is involved.
 ///
-/// [databaseDirectory] overrides where the file lives. [temporaryDirectory]
-/// overrides where sqlite3 spills intermediate results — the global `/tmp` is
-/// unreachable from a sandboxed app on some platforms. Both may return a
-/// [Directory] or a path [String], and both default to the app's own
-/// directories via `path_provider`. They exist so tests can drive this exact
-/// function rather than a lookalike.
+/// [databaseDirectory] and [temporaryDirectory] exist so tests can drive this
+/// exact function rather than a lookalike.
 ///
 /// This deliberately opens the database through `package:drift` directly
 /// rather than through the Flutter convenience wrapper. That wrapper drags the
@@ -167,68 +268,29 @@ void configureEncryptedDatabase(CommonDatabase db, String key) {
 /// dependency tree as end-of-life markers, and Jotno's dependency tree has to
 /// survive an audit. CI greps `pubspec.lock` for them, so do not reintroduce
 /// the wrapper.
-QueryExecutor encryptedDatabaseConnection(
+Future<QueryExecutor> encryptedDatabaseConnection(
   String key, {
   Future<Object> Function()? databaseDirectory,
   Future<Object> Function()? temporaryDirectory,
-}) {
-  return LazyDatabase(() async {
-    final directoryPath = _asPath(
-      await (databaseDirectory ?? getApplicationSupportDirectory)(),
-      'databaseDirectory',
-    );
+  RawDatabaseOpener openRaw = openRawDatabase,
+}) async {
+  final file = await resolveDatabaseFile(databaseDirectory: databaseDirectory);
+  final tempPath = await configureSqliteTempDirectory(
+    temporaryDirectory: temporaryDirectory,
+  );
 
-    final directory = Directory(directoryPath);
-    if (!directory.existsSync()) {
-      await directory.create(recursive: true);
-    }
+  verifyEncryptedDatabaseFile(file, key, openRaw: openRaw);
 
-    final file = File('$directoryPath/$databaseFileName.sqlite');
-
-    // sqlite3 spills large intermediate results to a temporary directory. The
-    // global `/tmp` is unreachable from a sandboxed app on some platforms, so
-    // point it at one the app owns — on the calling isolate and, below, on the
-    // background isolate that actually hosts the connection.
-    final tempPath = _asPath(
-      await (temporaryDirectory ?? getTemporaryDirectory)(),
-      'temporaryDirectory',
-    );
-    sqlite3.tempDirectory = tempPath;
-
-    // Prove the cipher and the key here, on the calling isolate, before the
-    // connection moves to a background one. A failure raised inside that
-    // isolate reaches the caller wrapped in a `DriftRemoteException`, which
-    // would blur the two failures this story exists to keep apart. Doing it
-    // first means startup sees [MissingCipherError] and
-    // [DatabaseKeyRejectedException] exactly as thrown.
+  return NativeDatabase.createInBackground(
+    file,
+    // Defence in depth. The background isolate opens its own connection, so it
+    // must verify for itself rather than trusting the check above.
     //
-    // `sqlite3.open` creates the file before the check can run, so a failed
-    // attempt would leave a zero-byte file behind — and a zero-byte file
-    // passes a "does not start with the plaintext header" check for free.
-    // Remove it again if it did not exist before this attempt.
-    final existedBefore = file.existsSync();
-    final probe = sqlite3.open(file.path);
-    try {
-      configureEncryptedDatabase(probe, key);
-    } on Object {
-      probe.close();
-      if (!existedBefore && file.existsSync() && file.lengthSync() == 0) {
-        file.deleteSync();
-      }
-      rethrow;
-    }
-    probe.close();
-
-    return NativeDatabase.createInBackground(
-      file,
-      // Sent to the background isolate that hosts the connection, so it may
-      // only capture sendable values. `key` is a String. The background
-      // isolate opens its own connection, so it repeats the check rather than
-      // trusting the probe above.
-      setup: (db) => configureEncryptedDatabase(db, key),
-      isolateSetup: () async => sqlite3.tempDirectory = tempPath,
-    );
-  });
+    // Sent across isolates, so it may only capture sendable values; `key` is a
+    // String.
+    setup: (db) => configureEncryptedDatabase(db, key),
+    isolateSetup: () async => sqlite3.tempDirectory = tempPath,
+  );
 }
 
 /// Resolves the key from [keyProvider] and opens the Jotno database.
@@ -236,12 +298,14 @@ Future<QueryExecutor> openEncryptedDatabase({
   DatabaseKeyProvider keyProvider = const DevelopmentKeyProvider(),
   Future<Object> Function()? databaseDirectory,
   Future<Object> Function()? temporaryDirectory,
+  RawDatabaseOpener openRaw = openRawDatabase,
 }) async {
   final key = await keyProvider.databaseKey();
   return encryptedDatabaseConnection(
     key,
     databaseDirectory: databaseDirectory,
     temporaryDirectory: temporaryDirectory,
+    openRaw: openRaw,
   );
 }
 
