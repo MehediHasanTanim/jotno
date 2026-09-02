@@ -1,0 +1,22 @@
+# Localisation generation.
+#
+# Bangla is the template, not English. That is not a formality: the template
+# ARB is the file `gen-l10n` derives the message signatures and the
+# placeholders from, and it is the file a translator is expected to be
+# complete. Making `bn` the template puts the primary language in the primary
+# position — a key that exists only in English is then the anomaly, which is
+# what `tool/l10n_parity_gate.sh` is there to catch.
+#
+# Generation runs on `flutter pub get` (see `generate: true` in pubspec.yaml)
+# and writes beside the ARB files in `lib/l10n/`. The output is committed so
+# the analyzer, the editor and CI all read the same sources; CI's
+# "generated sources are up to date" step fails if the committed copy drifts
+# from what generation produces.
+arb-dir: lib/l10n
+template-arb-file: app_bn.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+
+# Formatted at generation time, because `dart format --set-exit-if-changed .`
+# in CI covers the whole tree and does not know which files a tool wrote.
+format: true

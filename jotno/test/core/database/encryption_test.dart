@@ -436,11 +436,15 @@ void main() {
   });
 
   group('AppDatabase over an encrypted connection', () {
-    test('creates schema v1 and round-trips a row', () async {
+    test('creates the current schema and round-trips a row', () async {
       final database = _openAppDatabase(dbFile, 'a-plain-key');
       addTearDown(database.close);
 
-      expect(database.schemaVersion, 1);
+      // Story 1.3 added the settings table, taking the schema to v2. The
+      // number is asserted rather than ignored because a bump that skipped
+      // `drift_dev make-migrations` must not slip through, and the generated
+      // tests under `test/migration/` are what prove the step itself.
+      expect(database.schemaVersion, 2);
 
       await _insertSmokeRow(database, '0199a0c8-0000-7000-8000-000000000001');
 

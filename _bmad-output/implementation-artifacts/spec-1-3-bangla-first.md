@@ -2,7 +2,7 @@
 title: 'Story 1.3 — The app speaks Bangla first'
 type: 'feature'
 created: '2026-09-01'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: 'cbdcb0981b2aab9572fbf32a50da9ec85933281a'
 review_loop_iteration: 0
 context:
@@ -64,14 +64,14 @@ New: `jotno/l10n.yaml`, `jotno/lib/l10n/app_bn.arb`, `jotno/lib/l10n/app_en.arb`
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `jotno/pubspec.yaml` + `jotno/l10n.yaml` — add `flutter_localizations` (SDK) and `intl`; configure generation with `bn` as template
-- [ ] `jotno/lib/l10n/app_bn.arb` / `app_en.arb` — the eleven live keys plus the strings the two current screens render, complete in both
-- [ ] `jotno/lib/core/l10n/locale_controller.dart` — resolve locale: stored choice, else device locale if English, else Bangla; expose a runtime switch
-- [ ] `jotno/lib/core/database/app_database.dart` — a settings table holding the language choice; schema bump with generated migration
-- [ ] `jotno/lib/core/l10n/number_format.dart` — one formatter producing Bengali numerals in `bn`; the only way a number reaches the UI
-- [ ] `jotno/lib/main.dart` — wire delegates and `locale`; render both surfaces from ARB; the error surface resolves locale without the database
-- [ ] `jotno/tool/l10n_parity_gate.sh` + `.github/workflows/ci.yaml` — fail on any key in one ARB and not the other, naming key and file
-- [ ] `jotno/test/core/l10n/` — locale resolution matrix, the formatter, and a test driving the parity gate against a deliberately unbalanced pair
+- [x] `jotno/pubspec.yaml` + `jotno/l10n.yaml` — add `flutter_localizations` (SDK) and `intl`; configure generation with `bn` as template
+- [x] `jotno/lib/l10n/app_bn.arb` / `app_en.arb` — the eleven live keys plus the strings the two current screens render, complete in both
+- [x] `jotno/lib/core/l10n/locale_controller.dart` — resolve locale: stored choice, else device locale if English, else Bangla; expose a runtime switch
+- [x] `jotno/lib/core/database/app_database.dart` — a settings table holding the language choice; schema bump with generated migration
+- [x] `jotno/lib/core/l10n/number_format.dart` — one formatter producing Bengali numerals in `bn`; the only way a number reaches the UI
+- [x] `jotno/lib/main.dart` — wire delegates and `locale`; render both surfaces from ARB; the error surface resolves locale without the database
+- [x] `jotno/tool/l10n_parity_gate.sh` + `.github/workflows/ci.yaml` — fail on any key in one ARB and not the other, naming key and file
+- [x] `jotno/test/core/l10n/` — locale resolution matrix, the formatter, and a test driving the parity gate against a deliberately unbalanced pair
 
 **Acceptance Criteria:**
 - Given a device locale that is neither Bangla nor English, when the app opens with no stored choice, then it renders Bangla.

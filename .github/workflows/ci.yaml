@@ -159,6 +159,21 @@ jobs:
       - name: Nothing under lib writes to the device log
         run: bash tool/no_print_gate.sh
 
+      # The l10n parity gate. Same family as the logging gate above: a static
+      # check on what the source is allowed to contain, run from a script so a
+      # developer can run exactly what CI runs, and driven by
+      # `test/core/l10n/l10n_parity_gate_test.dart` against a deliberately
+      # unbalanced pair so it is a gate somebody has watched fail.
+      #
+      # It exists because the failure it catches is silent. `gen-l10n` fills a
+      # missing key from the template locale rather than erroring, so a key
+      # added to `app_en.arb` alone shows an English sentence to a Bangla
+      # reader — no crash, no log line, no failing test, and nobody notices
+      # until a user does. Bangla is the primary language here, so that is not
+      # a cosmetic defect.
+      - name: Both locales are complete
+        run: bash tool/l10n_parity_gate.sh
+
       - name: Analyze
         run: flutter analyze --fatal-infos
 

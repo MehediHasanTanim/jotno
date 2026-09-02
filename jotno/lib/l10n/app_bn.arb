@@ -1,0 +1,66 @@
+{
+  "@@locale": "bn",
+  "appTitle": "যত্ন",
+  "@appTitle": {
+    "description": "The application name, shown in the task switcher and as the MaterialApp title."
+  },
+  "databaseReady": "এনক্রিপ্ট করা ডেটাবেস স্কিমা সংস্করণ {version}-এ খোলা আছে।",
+  "@databaseReady": {
+    "description": "The only thing the app renders once the encrypted database is open, until the first real screen lands. Placeholder-driven so the schema number goes through the shared number formatter.",
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "description": "The schema version, already rendered by AppNumberFormat. A String and not an int on purpose: every number in this app reaches the UI through one formatter, so ICU must never format one itself.",
+        "example": "১"
+      }
+    }
+  },
+  "startupFailureTitle": "যত্ন চালু হতে পারছে না",
+  "@startupFailureTitle": {
+    "description": "Heading of the surface shown when the encrypted database cannot be opened."
+  },
+  "startupFailureMissingCipher": "এই বিল্ডে এনক্রিপশন ছাড়া SQLite লাইব্রেরি এসেছে, তাই আপনার রেকর্ড সুরক্ষিত থাকত না। এই অবস্থায় যত্ন ডেটাবেস খুলবে না। অফিসিয়াল বিল্ড থেকে আবার ইনস্টল করুন।",
+  "@startupFailureMissingCipher": {
+    "description": "The shipped SQLite library is not the SQLite3MultipleCiphers build, so the database would be written in plaintext."
+  },
+  "startupFailureEmptyKey": "যত্ন-কে একটি খালি ডেটাবেস কী দেওয়া হয়েছে, যা আপনার রেকর্ড এনক্রিপ্ট না করেই রেখে দিত। এই অবস্থায় যত্ন ডেটাবেস খুলবে না।",
+  "@startupFailureEmptyKey": {
+    "description": "The database key was empty, which in SQLite3MultipleCiphers leaves the file unencrypted rather than failing."
+  },
+  "startupFailureDevelopmentKeyInRelease": "এই বিল্ডে এমন একটি ডেভেলপমেন্ট কী ব্যবহার হয়েছে যা প্রতিটি ইনস্টলে একই। এই অবস্থায় যত্ন ডেটাবেস খুলবে না। অফিসিয়াল বিল্ড থেকে আবার ইনস্টল করুন।",
+  "@startupFailureDevelopmentKeyInRelease": {
+    "description": "A release build reached the development key provider, so every install would share one key."
+  },
+  "startupFailureKeyRejected": "এই ফোনে থাকা ডেটাবেস হাতে থাকা কী দিয়ে খোলা যায়নি। আপনার রেকর্ড এখনও ফোনে এনক্রিপ্ট করা আছে এবং বদলায়নি।",
+  "@startupFailureKeyRejected": {
+    "description": "The cipher is present but the key does not unlock the existing database file."
+  },
+  "startupFailureTimedOut": "এই ফোনে যত্ন চালু হওয়া শেষ করতে পারেনি। কোনো তথ্য বদলায়নি। অ্যাপটি আবার খুলে দেখুন।",
+  "@startupFailureTimedOut": {
+    "description": "Startup did not finish inside the watchdog timeout."
+  },
+  "startupFailureUnknown": "এই ফোনে ডেটাবেস খোলা যায়নি।",
+  "@startupFailureUnknown": {
+    "description": "Anything else — corruption, a locked file, an I/O error. Deliberately says nothing it cannot prove."
+  },
+  "failureStorage": "এই ফোনে তথ্য সংরক্ষণ করা যায়নি। আপনার রেকর্ড বদলায়নি।",
+  "@failureStorage": {
+    "description": "StorageFailure — the local database itself failed: disk full, file locked, I/O error."
+  },
+  "failureValidation": "এই তথ্য সংরক্ষণ করা যায়নি। যা লিখেছেন তা দেখে আবার চেষ্টা করুন।",
+  "@failureValidation": {
+    "description": "ValidationFailure — input was rejected before anything was written. Names no field and no value, because both are health data by default."
+  },
+  "failureNotFound": "এই রেকর্ডটি আর এই ফোনে নেই।",
+  "@failureNotFound": {
+    "description": "NotFoundFailure — the requested record does not exist, or is soft-deleted."
+  },
+  "failurePermission": "এই কাজের জন্য যে অনুমতি দরকার, যত্ন-এর তা নেই। ফোনের সেটিংস থেকে অনুমতিটি দিতে পারেন।",
+  "@failurePermission": {
+    "description": "PermissionFailure — the operating system withheld a permission the operation needed."
+  },
+  "failureUnexpected": "কিছু একটা ভুল হয়েছে। কোনো তথ্য বদলায়নি।",
+  "@failureUnexpected": {
+    "description": "UnexpectedFailure — something nobody anticipated happened inside a boundary."
+  }
+}

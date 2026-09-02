@@ -32,8 +32,18 @@ hooks:
 dependencies:
   flutter:
     sdk: flutter
+  # Ships with the SDK. Supplies the Material, Cupertino and Widgets
+  # localisation delegates for `bn`, which the generated `AppLocalizations`
+  # delegate sits alongside in `main.dart`.
+  flutter_localizations:
+    sdk: flutter
 
   drift: ^2.34.2
+  # Version deliberately unconstrained: `flutter_localizations` pins `intl`
+  # exactly, and any caret range here would sooner or later contradict it and
+  # make the whole solve fail. `pubspec.lock` is the pin, and CI resolves with
+  # `--enforce-lockfile`.
+  intl: any
   path_provider: ^2.1.6
   sqlite3: ^3.5.0
 
@@ -49,3 +59,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Runs `gen-l10n` on `pub get` and before every build, using `l10n.yaml`.
+  # The generated sources are committed, so `flutter analyze` and the editor
+  # see the same `AppLocalizations` CI does.
+  generate: true
