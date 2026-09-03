@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-31-2026 21:50
-last_updated: "09-02-2026 13:06"
+last_updated: "09-02-2026 19:20"
 project: Jotno
 project_key: NOKEY
 tracking_system: file-system
@@ -39,16 +39,18 @@ development_status:
   1-1-a-database-that-proves-it-is-encrypted: done
   1-2-the-foundations-every-feature-is-required-to-use: done
   1-3-the-app-speaks-bangla-first: in-progress
-  1-4-a-design-system-the-whole-app-inherits: backlog
-  1-5-shared-components-that-carry-the-rules: backlog
-  1-6-first-launch-leads-with-the-promise: backlog
-  1-7-create-a-family: backlog
-  1-8-add-and-manage-family-members: backlog
-  1-9-record-conditions-and-allergies: backlog
-  1-10-record-medical-history: backlog
-  1-11-keep-a-directory-of-doctors-and-hospitals: backlog
-  1-12-see-a-member-s-health-at-a-glance: backlog
-  1-13-a-recovery-phrase-that-can-rebuild-the-key: backlog
+  1-4-the-services-no-feature-is-allowed-to-reinvent: backlog
+  1-5-performance-budgets-that-something-actually-measures: backlog
+  1-6-a-design-system-the-whole-app-inherits: backlog
+  1-7-shared-components-that-carry-the-rules: backlog
+  1-8-first-launch-leads-with-the-promise: backlog
+  1-9-create-a-family: backlog
+  1-10-add-and-manage-family-members: backlog
+  1-11-record-conditions-and-allergies: backlog
+  1-12-record-medical-history: backlog
+  1-13-keep-a-directory-of-doctors-and-hospitals: backlog
+  1-14-see-a-member-s-health-at-a-glance: backlog
+  1-15-a-recovery-phrase-that-can-rebuild-the-key: backlog
   epic-1-retrospective: optional
 
   epic-2: backlog

@@ -11,16 +11,18 @@ A household installs the app, creates a family with no account of any kind, adds
 - Story 1.1: A database that proves it is encrypted
 - Story 1.2: The foundations every feature is required to use
 - Story 1.3: The app speaks Bangla first
-- Story 1.4: A design system the whole app inherits
-- Story 1.5: Shared components that carry the rules
-- Story 1.6: First launch leads with the promise
-- Story 1.7: Create a family
-- Story 1.8: Add and manage family members
-- Story 1.9: Record conditions and allergies
-- Story 1.10: Record medical history
-- Story 1.11: Keep a directory of doctors and hospitals
-- Story 1.12: See a member's health at a glance
-- Story 1.13: A recovery phrase that can rebuild the key
+- Story 1.4: The services no feature is allowed to reinvent
+- Story 1.5: Performance budgets that something actually measures
+- Story 1.6: A design system the whole app inherits
+- Story 1.7: Shared components that carry the rules
+- Story 1.8: First launch leads with the promise
+- Story 1.9: Create a family
+- Story 1.10: Add and manage family members
+- Story 1.11: Record conditions and allergies
+- Story 1.12: Record medical history
+- Story 1.13: Keep a directory of doctors and hospitals
+- Story 1.14: See a member's health at a glance
+- Story 1.15: A recovery phrase that can rebuild the key
 
 ## Requirements & Constraints
 
@@ -74,11 +76,12 @@ A household installs the app, creates a family with no account of any kind, adds
 
 ## Cross-Story Dependencies
 
-- The encrypted database and the cross-cutting core services (Stories 1.1 and 1.2) are hard prerequisites for everything else in the epic and in the project; no feature work should begin before they and their CI gates exist.
-- Localisation, theme tokens and shared components (Stories 1.3–1.5) gate every screen-building story that follows, here and in later epics.
+- The encrypted database and the cross-cutting core services (Stories 1.1, 1.2 and 1.4) are hard prerequisites for everything else in the epic and in the project; no feature work should begin before they and their CI gates exist. Story 1.2 shipped narrowed — it delivered `Result`/`AppFailure` and `AppLogger`; Story 1.4 carries the rest.
+- Localisation, theme tokens and shared components (Stories 1.3, 1.6 and 1.7) gate every screen-building story that follows, here and in later epics.
 - The physical-device screen-reader protocol established with the component library is re-run by every subsequent epic over the screens it adds.
-- `AttachmentStore` is consumed first by medical-history attachments here, then by prescriptions, appointments, lab reports, vaccinations and the document vault in later epics.
+- `AttachmentStore` is built in Story 1.4 and consumed first by the member profile photo (1.10) and medical-history attachments (1.12) here, then by prescriptions, appointments, lab reports, vaccinations and the document vault in later epics.
 - Doctors and hospitals are owned in this epic and referenced by id from appointments (Epic 3) and lab reports (Epic 4).
 - The condition predicate and the three contributor interfaces are the contracts the timeline, calendar, emergency card and PDF export depend on in Epics 3, 5, 6 and 9.
-- The recovery-phrase key wrapping is the precondition for backup and restore in Epic 7.
+- The recovery-phrase key wrapping (1.15) is the precondition for backup and restore in Epic 7.
+- The reference fixture and benchmark harness (Story 1.5) precede every acceptance criterion phrased against reference size; Story 1.14 is the first, and eight stories across later epics depend on it.
 - The voice-and-microcopy rules and the Bangla accessibility obligation are standing constraints on every story in every epic, not one-off deliverables.

@@ -353,11 +353,13 @@ A household installs Jotno, creates their family with no account, adds every mem
 **FRs:** FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-7, FR-8, FR-9, FR-10, FR-11, FR-12, FR-13, FR-40, FR-46, FR-61, FR-62
 **NFRs:** NFR-P1, NFR-P3, NFR-S1, NFR-S3, NFR-S4, NFR-A1, NFR-A2
 **UX-DRs:** UX-DR1–9, UX-DR11, UX-DR13, UX-DR14, UX-DR15, UX-DR20, UX-DR21, UX-DR23, UX-DR24
-**ADs:** AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-11, AD-16, AD-17, AD-18, AD-20, AD-22, AD-23, AD-27, AD-28, AD-29
+**ADs:** AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-11, AD-12, AD-16, AD-17, AD-18, AD-20, AD-22, AD-23, AD-27, AD-28, AD-29
 
 > **Validated 2026-08-30.** An independent dependency review found 7 blocking sequence violations; all are closed. Story 1.2 was added to own the eight cross-cutting foundations that had no home, `AttachmentStore` moved from Epic 2 to Epic 1 where its first consumers live, Epic 4 was reordered so `TrendChart` precedes the stories that render charts, and three Epic 7 acceptance criteria were rewritten to stop depending on Epic 8. Every named component is now created in or before the story that first uses it, and all three story cross-references point backward.
 
-> **UX-DR23 is a standing obligation, not a one-off story.** Bangla screen-reader output must be verified on real devices with TalkBack and VoiceOver — Bengali TTS coverage is uneven, and a medication name announced unintelligibly is a safety defect. Story 1.4 establishes the protocol and verifies the screens that exist at that point; every epic thereafter re-runs it over the screens it added. It cannot be satisfied in an emulator.
+> **Re-validated 2026-09-02.** Story 1.2 was narrowed during implementation and four of its six foundations lost their owner — the same orphaning the 2026-08-30 review closed. Stories 1.4 and 1.5 reclaim them: 1.4 owns the runtime services (`HeadlessScope`, `AttachmentStore`, the contributor interfaces), 1.5 owns the measurement apparatus (reference fixture, benchmark gate). Both sit ahead of their first consumers — 1.10 and 1.12 for attachments, 1.14 for the fixture, Epic 2 for headless entry points.
+
+> **UX-DR23 is a standing obligation, not a one-off story.** Bangla screen-reader output must be verified on real devices with TalkBack and VoiceOver — Bengali TTS coverage is uneven, and a medication name announced unintelligibly is a safety defect. Story 1.7 establishes the protocol and verifies the screens that exist at that point; every epic thereafter re-runs it over the screens it added. It cannot be satisfied in an emulator.
 
 > **UX-DR24 (voice and microcopy) is likewise cross-cutting.** Every story that writes user-facing copy is bound by the EXPERIENCE.md voice rules: no exclamation marks, no encouragement or streaks, no clinical judgement phrasing, and failures that name the specific thing that failed and what to do about it.
 
@@ -408,26 +410,7 @@ So that no feature invents its own version and has to be unpicked later.
 **And** `toString()` on health entities returns type and id only
 **And** the CI grep gate fails the build on direct `print` or `debugPrint` under `features/`
 
-**Given** code that must run outside the widget tree — a notification action, a boot receiver, a background task
-**When** this story completes
-**Then** `HeadlessScope` exists and builds a container those entry points use to reach repositories
-**And** it is the only permitted path for doing so
-
-**Given** files must be attached to records
-**When** this story completes
-**Then** `AttachmentStore` exists in `core/storage` as the only code that constructs attachment paths or deletes attachment files
-**And** attachment rows carry relative path, mime, size, checksum, `entity_type` and `entity_id`
-**And** binary content is never stored in a database column
-
-**Given** four surfaces will later aggregate across features
-**When** this story completes
-**Then** `TimelineContributor`, `CalendarContributor` and `SummaryContributor` exist as domain interfaces with fixed output shapes
-
-**Given** nine performance budgets must be measurable
-**When** this story completes
-**Then** a generated reference-dataset fixture exists in `test/fixtures` — 10 members, 20 years, 10,000 measurements, 10,000 medication logs, 5,000 documents, 500 appointments
-**And** a benchmark harness runs the NFR-P budgets against it in CI on a fixed profile
-**And** repositories serving list surfaces expose paged queries only; an unpaged `getAll` on a growing table fails review
+> **Narrowed 2026-09-02.** As built, this story delivered `Result`/`AppFailure` and `AppLogger` only. The four further foundations it originally carried — `HeadlessScope`, `AttachmentStore`, the three contributor interfaces, and the reference fixture with its benchmark harness — were split out during implementation and left without an owner. Stories 1.4 and 1.5 now own them, and both precede the stories that first consume them.
 
 ### Story 1.3: The app speaks Bangla first
 
@@ -461,7 +444,77 @@ So that I can read my family's health records in my own language.
 **Then** no text overflows, clips, or corrupts a conjunct
 **And** long strings wrap rather than truncate
 
-### Story 1.4: A design system the whole app inherits
+### Story 1.4: The services no feature is allowed to reinvent
+
+As the person about to build the first screen that stores a photo,
+I want the file store, the headless container and the aggregator contracts to exist before anything needs them,
+So that no feature writes a file path of its own or reaches a repository by a route nobody sanctioned.
+
+**Acceptance Criteria:**
+
+**Given** code that must run outside the widget tree — a notification action, a boot receiver, a background task
+**When** this story completes
+**Then** `HeadlessScope` exists and builds the container those entry points use to reach repositories
+**And** it is the only permitted path for doing so
+**And** a test drives a repository call through it with no widget tree present, because that is the condition it exists to survive
+
+**Given** files must be attached to records
+**When** this story completes
+**Then** `AttachmentStore` exists in `core/storage` as the only code that constructs attachment paths or deletes attachment files
+**And** the `attachments` table is created here, carrying relative path, mime, size, checksum, polymorphic `entity_type` and `entity_id`, and the standard identity columns
+**And** binary content is never stored in a database column
+
+**Given** an attachment whose owning record is deleted
+**When** the deletion commits
+**Then** the attachment row soft-deletes and the file remains on disk until a permanent-erasure path runs
+**And** no code outside `AttachmentStore` removes an attachment file, in this story or any later one
+
+**Given** four surfaces will later aggregate across features
+**When** this story completes
+**Then** `TimelineContributor`, `CalendarContributor` and `SummaryContributor` exist as domain interfaces with fixed output shapes
+**And** each is a pure interface with no implementation, because the features that implement them do not exist yet
+
+**Given** a file under `lib/features/`
+**When** the CI gates run
+**Then** the build fails if it constructs an attachment path or touches the filesystem directly, in the same style as the logging gate
+
+### Story 1.5: Performance budgets that something actually measures
+
+As the person who will be held to a three-second cold start,
+I want the reference dataset and its benchmarks to exist before the first story that cites them,
+So that a performance budget is a test that can fail rather than a sentence in a document.
+
+**Acceptance Criteria:**
+
+**Given** the reference dataset defined by the architecture
+**When** this story completes
+**Then** a generated fixture exists in `test/fixtures` — 10 members, 20 years, 10,000 measurements, 10,000 medication logs, 5,000 documents, 500 appointments
+**And** it is seeded, so two generations produce identical data and a regression is never mistaken for noise
+**And** it is regenerable by one documented command, and the generator is committed alongside it
+
+**Given** the fixture and a budget whose surface exists
+**When** the benchmark harness runs in CI on a fixed profile
+**Then** the budget is asserted as a test that fails when exceeded, not reported as a number nobody reads
+
+**Given** a budget whose surface does not exist yet — the timeline, the calendar, the PDF
+**When** the harness runs
+**Then** a benchmark for it is registered and skipped, naming the story that will enable it
+**And** the count of skipped budgets is printed, so an unmeasured budget is visible rather than absent
+
+**Given** the device-bound budgets — cold start (NFR-P3) and 60fps scroll (NFR-P4)
+**When** this story completes
+**Then** the harness states plainly that they cannot be asserted on a host runner
+**And** they are recorded against the same deferred emulator job that Story 1.1's release-build cipher assertion needs, so one infrastructure decision closes both
+
+**Given** a repository serving a list surface
+**When** it is written
+**Then** it exposes paged queries only; an unpaged `getAll` on a growing table fails review
+
+**Given** the fixture generator
+**When** it runs in CI
+**Then** nothing it produces reaches a log or a CI annotation, because the logging gate binds test code that handles record-shaped data as firmly as it binds `lib/`
+
+### Story 1.6: A design system the whole app inherits
 
 As the person building every later screen,
 I want the palette, type ramp and spacing to exist as theme tokens,
@@ -489,7 +542,7 @@ So that no screen invents its own colours or sizes.
 **Then** it uses a 1px hairline border and no shadow
 **And** the only shadow in the system is on bottom sheets
 
-### Story 1.5: Shared components that carry the rules
+### Story 1.7: Shared components that carry the rules
 
 As the person building every later screen,
 I want buttons, cards, rows, inputs and badges to come from one place,
@@ -529,7 +582,7 @@ So that the accessibility floor and the severity treatment cannot drift.
 **Then** every control announces intelligibly, and the verification protocol is written down for later epics to re-run
 **And** widget tests assert layout integrity at the largest dynamic-type setting
 
-### Story 1.6: First launch leads with the promise
+### Story 1.8: First launch leads with the promise
 
 As someone who has never heard of this app,
 I want to understand what it is and what it does with my data before I agree to anything,
@@ -561,7 +614,7 @@ So that I can decide whether to trust it.
 **Then** the full policy renders in-app, in the active language, with no internet connection
 **And** it covers all seven required disclosures
 
-### Story 1.7: Create a family
+### Story 1.9: Create a family
 
 As the person who manages my household's health,
 I want to name my family and start,
@@ -582,7 +635,7 @@ So that the app is set up in seconds without an account.
 **When** the app opens thereafter
 **Then** Home shows the family, not an individual member
 
-### Story 1.8: Add and manage family members
+### Story 1.10: Add and manage family members
 
 As the person who manages my household's health,
 I want to add everyone in my family with their basic details,
@@ -610,7 +663,7 @@ So that each person has somewhere their records can live.
 **Then** the photo-library permission is requested at that moment, preceded by an in-app rationale screen in the active language
 **And** denying it hides the photo option rather than showing a broken control
 
-### Story 1.9: Record conditions and allergies
+### Story 1.11: Record conditions and allergies
 
 As someone caring for a family member with a chronic illness,
 I want their conditions and allergies recorded and impossible to miss,
@@ -640,7 +693,7 @@ So that anyone reading their profile sees the dangerous facts first.
 **When** any surface needs to know which conditions are current
 **Then** it calls the `isActiveCondition` predicate, and no caller filters on status directly
 
-### Story 1.10: Record medical history
+### Story 1.12: Record medical history
 
 As someone whose family has a long medical past,
 I want past illnesses, surgeries and hospitalisations recorded,
@@ -665,7 +718,7 @@ So that a new doctor can be told what has already happened.
 **When** the entry is deleted
 **Then** the entry soft-deletes and the linked documents are not deleted
 
-### Story 1.11: Keep a directory of doctors and hospitals
+### Story 1.13: Keep a directory of doctors and hospitals
 
 As someone who takes several family members to several clinics,
 I want the doctors and places we use saved once,
@@ -690,7 +743,7 @@ So that I do not retype them for every appointment.
 **When** the user taps the number
 **Then** the device dialler opens with that number
 
-### Story 1.12: See a member's health at a glance
+### Story 1.14: See a member's health at a glance
 
 As the person managing my family's health,
 I want each member's dashboard to summarise what matters today,
@@ -715,7 +768,7 @@ So that I know their state without opening five screens.
 **When** the dashboard is benchmarked
 **Then** the app is interactive within 3 seconds of cold start on a 2GB Android 10 device
 
-### Story 1.13: A recovery phrase that can rebuild the key
+### Story 1.15: A recovery phrase that can rebuild the key
 
 As someone whose phone might be replaced or restored,
 I want a phrase that can unlock my records even if the phone forgets its key,
@@ -925,7 +978,7 @@ So that I am not storing the same photo three times.
 **Given** a member exists
 **When** the user creates a prescription
 **Then** they can record prescribing doctor, hospital, date, notes, and attach one or more images or PDFs
-**And** attachments are written through the `AttachmentStore` built in Story 1.2, under the Prescription category
+**And** attachments are written through the `AttachmentStore` built in Story 1.4, under the Prescription category
 
 **Given** a prescription exists
 **When** the user adds medications
@@ -1759,7 +1812,7 @@ So that nobody else is holding my family's records.
 **Then** it satisfies the `CloudStorageProvider` interface, and no provider type name appears outside its own file and the registry
 
 **Given** a provider is now connected
-**When** the user revisits the recovery phrase screen from Story 1.13
+**When** the user revisits the recovery phrase screen from Story 1.15
 **Then** saving the phrase to that provider becomes available as a destination
 **And** choosing the same provider that holds their backups shows an explicit warning that one account compromise then yields both the encrypted backup and the means to open it
 **And** the app recommends a different location without preventing the choice
