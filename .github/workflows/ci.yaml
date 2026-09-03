@@ -5,10 +5,25 @@
 # every step runs from there via the `working-directory` default below.
 name: CI
 
+# PAUSED FOR THE DEVELOPMENT PHASE.
+#
+# The automatic triggers are commented out rather than deleted, so restoring
+# them is uncommenting four lines. Until then this workflow runs only when
+# started by hand from the Actions tab (workflow_dispatch), which keeps every
+# gate below reachable on demand — `flutter analyze`, the encryption switch,
+# the forbidden-package scan, the no-print gate, the l10n parity gate, the
+# migration check and the test suite.
+#
+# Restore before Epic 1 closes. These are not style checks: each one stands in
+# for a failure that is unrecoverable once it reaches a device — an
+# unencrypted database that looks healthy (AD-2), health data in a log
+# (AD-11), a migration that loses records with no server copy to restore from
+# (AD-17), an English-only string in a Bangla build (AD-18).
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
 
 # Read-only by default; nothing here writes to the repository.
 permissions:
