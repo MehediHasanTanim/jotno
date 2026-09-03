@@ -72,6 +72,7 @@ New: `jotno/l10n.yaml`, `jotno/lib/l10n/app_bn.arb`, `jotno/lib/l10n/app_en.arb`
 - [x] `jotno/lib/main.dart` — wire delegates and `locale`; render both surfaces from ARB; the error surface resolves locale without the database
 - [x] `jotno/tool/l10n_parity_gate.sh` + `.github/workflows/ci.yaml` — fail on any key in one ARB and not the other, naming key and file
 - [x] `jotno/test/core/l10n/` — locale resolution matrix, the formatter, and a test driving the parity gate against a deliberately unbalanced pair
+- [x] `jotno/test/core/l10n/dynamic_type_test.dart` — both surfaces at the largest dynamic-type setting, in both languages: no overflow, nothing truncates, the paragraph grows rather than clipping
 
 **Acceptance Criteria:**
 - Given a device locale that is neither Bangla nor English, when the app opens with no stored choice, then it renders Bangla.
@@ -80,8 +81,12 @@ New: `jotno/l10n.yaml`, `jotno/lib/l10n/app_bn.arb`, `jotno/lib/l10n/app_en.arb`
 - Given a key added to one ARB only, when the parity gate runs, then it fails naming the key and the missing file — proven by planting one, not assumed.
 - Given the Bangla locale, when any number renders, then it uses Bengali numerals; a raw `toString()` on a number in a widget fails review.
 - Given the database cannot be opened, when the error surface renders, then it is localised and does not itself throw.
+- Given Bangla text at the largest dynamic-type setting, when any screen renders, then no text overflows or clips, and long strings wrap rather than truncate. Conjunct rendering and screen-reader pronunciation are excluded here and verified on hardware — see the Spec Change Log.
 
 ## Spec Change Log
+
+- **The dynamic-type acceptance criterion was missing from this spec.** Finding: epics.md Story 1.3 carries a fifth criterion — Bangla at the largest dynamic-type setting must not overflow, clip or truncate — and it was not carried into this spec's acceptance list, so nothing in the suite set a text scale at all. The wrap rule was covered only as a widget-property check at the default size. Amended: the criterion is restored above and `test/core/l10n/dynamic_type_test.dart` asserts it at 3x on both surfaces in both languages, detecting overflow through `takeException` and proving the scale was applied by requiring the paragraph to grow. KEEP: the scale is set on the platform dispatcher, not an ancestor `MediaQuery` — both surfaces build their own `MaterialApp`, and `MediaQuery.fromView` reads the view, so a wrapping `MediaQuery` is silently ignored and the test would pass at the default size while claiming otherwise.
+- **Half of that criterion cannot be met in this suite, and says so in the suite.** Conjunct (যুক্তাক্ষর) rendering and Bangla screen-reader output depend on the device's font stack and TTS, which a widget test laying out against a test font cannot speak for. Per UX-DR23 this is a standing physical-device obligation, established as a protocol in Story 1.7 and re-run by every later epic. The boundary is stated as a test in `dynamic_type_test.dart` rather than only in this document, so a green run is not misread as covering it.
 
 ## Design Notes
 
