@@ -1,0 +1,3270 @@
+diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml
+index 6169857..2355f67 100644
+--- a/.github/workflows/ci.yaml
++++ b/.github/workflows/ci.yaml
+@@ -159,6 +159,21 @@ jobs:
+       - name: Nothing under lib writes to the device log
+         run: bash tool/no_print_gate.sh
+ 
++      # The l10n parity gate. Same family as the logging gate above: a static
++      # check on what the source is allowed to contain, run from a script so a
++      # developer can run exactly what CI runs, and driven by
++      # `test/core/l10n/l10n_parity_gate_test.dart` against a deliberately
++      # unbalanced pair so it is a gate somebody has watched fail.
++      #
++      # It exists because the failure it catches is silent. `gen-l10n` fills a
++      # missing key from the template locale rather than erroring, so a key
++      # added to `app_en.arb` alone shows an English sentence to a Bangla
++      # reader — no crash, no log line, no failing test, and nobody notices
++      # until a user does. Bangla is the primary language here, so that is not
++      # a cosmetic defect.
++      - name: Both locales are complete
++        run: bash tool/l10n_parity_gate.sh
++
+       - name: Analyze
+         run: flutter analyze --fatal-infos
+ 
+diff --git a/jotno/l10n.yaml b/jotno/l10n.yaml
+new file mode 100644
+index 0000000..cdb382e
+--- /dev/null
++++ b/jotno/l10n.yaml
+@@ -0,0 +1,22 @@
++# Localisation generation.
++#
++# Bangla is the template, not English. That is not a formality: the template
++# ARB is the file `gen-l10n` derives the message signatures and the
++# placeholders from, and it is the file a translator is expected to be
++# complete. Making `bn` the template puts the primary language in the primary
++# position — a key that exists only in English is then the anomaly, which is
++# what `tool/l10n_parity_gate.sh` is there to catch.
++#
++# Generation runs on `flutter pub get` (see `generate: true` in pubspec.yaml)
++# and writes beside the ARB files in `lib/l10n/`. The output is committed so
++# the analyzer, the editor and CI all read the same sources; CI's
++# "generated sources are up to date" step fails if the committed copy drifts
++# from what generation produces.
++arb-dir: lib/l10n
++template-arb-file: app_bn.arb
++output-localization-file: app_localizations.dart
++output-class: AppLocalizations
++
++# Formatted at generation time, because `dart format --set-exit-if-changed .`
++# in CI covers the whole tree and does not know which files a tool wrote.
++format: true
+diff --git a/jotno/lib/core/database/app_database.dart b/jotno/lib/core/database/app_database.dart
+index dc99796..b08989a 100644
+--- a/jotno/lib/core/database/app_database.dart
++++ b/jotno/lib/core/database/app_database.dart
+@@ -1,5 +1,8 @@
+ import 'package:drift/drift.dart';
+ 
++import '../l10n/locale_controller.dart';
++import '../result/app_failure.dart';
++import 'app_database.steps.dart';
+ import 'connection.dart';
+ import 'database_key.dart';
+ 
+@@ -36,17 +39,131 @@ class SmokeRecords extends Table {
+   Set<Column<Object>> get primaryKey => {id};
+ }
+ 
++/// Application settings, as one row per setting.
++///
++/// Deliberately *not* a new preferences package. AD-1 makes the local database
++/// the only source of truth, and `shared_preferences` would put a
++/// user-visible choice outside the encrypted file while adding a dependency
++/// the architecture has not pinned.
++///
++/// Key/value rather than a column per setting, because the alternative is a
++/// schema migration for every future toggle — the disclaimer acknowledgement,
++/// the ad-consent choice, the app-lock timeout — and generated migrations are
++/// the only kind permitted here.
++///
++/// No identity columns and no `deleted_at`. These are not records: a setting
++/// is overwritten, never tombstoned, and there is exactly one row per key on
++/// exactly one device. The soft-delete rule in AD-4 is about health data,
++/// which this table must never hold — see [settingLanguage] for the only key
++/// it currently has.
++@DataClassName('AppSetting')
++class AppSettings extends Table {
++  /// Which setting this row is. See [settingLanguage].
++  TextColumn get name => text().named('name')();
++
++  /// The stored value, as text.
++  ///
++  /// Text and not a typed column because the table is generic; each setting
++  /// owns the parsing of its own value, and an unparseable value is treated
++  /// as "not set" rather than as an error.
++  TextColumn get value => text().named('value')();
++
++  /// When the row was last written (UTC).
++  DateTimeColumn get updatedAt => dateTime().named('updated_at')();
++
++  @override
++  Set<Column<Object>> get primaryKey => {name};
++}
++
++/// The [AppSettings] row holding the user's language choice.
++///
++/// A literal constant, like every localisation key in this codebase: renaming
++/// the Dart identifier must not change which row is read.
++const String settingLanguage = 'language';
++
+ /// The Jotno database.
+ ///
+ /// Every connection handed to this class must already be configured by
+ /// [configureEncryptedDatabase] — see [openAppDatabase].
+-@DriftDatabase(tables: [SmokeRecords])
++@DriftDatabase(tables: [SmokeRecords, AppSettings])
+ class AppDatabase extends _$AppDatabase {
+   /// Creates a database over an already-configured [executor].
+   AppDatabase(super.executor);
+ 
+   @override
+-  int get schemaVersion => 1;
++  int get schemaVersion => 2;
++
++  /// Hand-written migrations are not permitted (AD-26).
++  ///
++  /// [stepByStep] and the `Schema2` shape it hands each step come from
++  /// `app_database.steps.dart`, which `dart run drift_dev make-migrations`
++  /// generates from the snapshots under `drift_schemas/`. The step body below
++  /// names a table on that generated shape rather than on this file's own
++  /// `appSettings`, so it keeps describing the v1→v2 transition unchanged
++  /// however the table is edited afterwards — which is the whole reason the
++  /// tool exists. CI regenerates and fails if the committed result differs.
++  ///
++  /// `test/migration/app_database/migration_test.dart`, also generated, runs
++  /// this against a real v1 database for every version pair.
++  @override
++  MigrationStrategy get migration => MigrationStrategy(
++    onUpgrade: stepByStep(
++      from1To2: (migrator, schema) => migrator.createTable(schema.appSettings),
++    ),
++  );
++
++  /// Reads the value of setting [name], or null if it has never been written.
++  Future<String?> readSetting(String name) async {
++    final row = await (select(
++      appSettings,
++    )..where((setting) => setting.name.equals(name))).getSingleOrNull();
++    return row?.value;
++  }
++
++  /// Writes [value] for setting [name], replacing whatever was there.
++  ///
++  /// `await`ed rather than returned, so the row id drift hands back is
++  /// discarded here rather than travelling out inside a `Future<void>` that
++  /// still carries it at runtime.
++  Future<void> writeSetting(String name, String value) async {
++    await into(appSettings).insertOnConflictUpdate(
++      AppSettingsCompanion.insert(
++        name: name,
++        value: value,
++        updatedAt: DateTime.now().toUtc(),
++      ),
++    );
++  }
++}
++
++/// The [LanguageStore] Jotno actually ships: the encrypted database.
++///
++/// The chicken-and-egg this creates is deliberate and is named in the story.
++/// The startup error surface renders precisely when the database will not
++/// open, so it cannot have one of these and resolves from the device locale
++/// instead. That surface has six fixed strings, and a user who chose English
++/// and sees the Bangla error once on a broken build has lost very little —
++/// less than they would lose from one user-visible setting living outside the
++/// encrypted file.
++final class DatabaseLanguageStore implements LanguageStore {
++  /// Creates a store over an open [database].
++  const DatabaseLanguageStore(this.database);
++
++  /// The open, encrypted database.
++  final AppDatabase database;
++
++  @override
++  FutureResult<AppLanguage?> read() => guardSettingAccess(() async {
++    // An unrecognised value is "no choice recorded", not an error: a row a
++    // future version wrote, or one that got corrupted, must resolve from the
++    // device rather than take the app down.
++    return AppLanguage.forCode(await database.readSetting(settingLanguage));
++  });
++
++  @override
++  FutureResult<void> write(AppLanguage language) => guardSettingAccess(
++    () => database.writeSetting(settingLanguage, language.languageCode),
++  );
+ }
+ 
+ /// Opens the encrypted Jotno database.
+diff --git a/jotno/lib/core/l10n/failure_messages.dart b/jotno/lib/core/l10n/failure_messages.dart
+new file mode 100644
+index 0000000..5cd9767
+--- /dev/null
++++ b/jotno/lib/core/l10n/failure_messages.dart
+@@ -0,0 +1,28 @@
++import '../../l10n/app_localizations.dart';
++import '../result/app_failure.dart';
++
++/// Turning an [AppFailure] into something a reader can read.
++///
++/// `AppFailure` carries a [AppFailure.localisationKey] and no message, which
++/// is what keeps free text — and therefore a condition name or a medication
++/// name — out of the failure model entirely. This extension is the other half
++/// of that arrangement: the one place where a key becomes a sentence.
++///
++/// It is a `switch` over the sealed hierarchy rather than a lookup by key,
++/// because `AppLocalizations` generates a getter per message and not a map.
++/// The consequence is the useful one: adding a variant to `AppFailure` without
++/// adding its message here does not compile.
++extension AppFailureMessage on AppFailure {
++  /// This failure's message in [strings]' language.
++  ///
++  /// Never contains anything derived from the failure itself.
++  /// [UnexpectedFailure.errorType] in particular is diagnostic, not something
++  /// to show a reader, so it is not interpolated here or anywhere else.
++  String message(AppLocalizations strings) => switch (this) {
++    StorageFailure() => strings.failureStorage,
++    ValidationFailure() => strings.failureValidation,
++    NotFoundFailure() => strings.failureNotFound,
++    PermissionFailure() => strings.failurePermission,
++    UnexpectedFailure() => strings.failureUnexpected,
++  };
++}
+diff --git a/jotno/lib/core/l10n/locale_controller.dart b/jotno/lib/core/l10n/locale_controller.dart
+new file mode 100644
+index 0000000..c19ee35
+--- /dev/null
++++ b/jotno/lib/core/l10n/locale_controller.dart
+@@ -0,0 +1,215 @@
++import 'package:flutter/foundation.dart';
++import 'package:flutter/widgets.dart' show Locale;
++
++import '../result/app_failure.dart';
++import '../result/boundary.dart';
++import '../result/result.dart';
++
++/// The languages Jotno ships.
++///
++/// Two, both complete. There is no partial third: `tool/l10n_parity_gate.sh`
++/// fails the build on a key present in one ARB and missing from the other, so
++/// adding a language here without finishing it is not a state the repository
++/// can be left in.
++enum AppLanguage {
++  /// Bangla. The default, and the template ARB.
++  bangla('bn'),
++
++  /// English. A setting, not a fallback.
++  english('en');
++
++  const AppLanguage(this.languageCode);
++
++  /// The ISO 639-1 code. This is what is persisted and what `intl` is given.
++  ///
++  /// A literal constant rather than the enum's `name`, for the same reason
++  /// every localisation key in this codebase is: a rename or an obfuscated
++  /// release build must not be able to change what a stored row means.
++  final String languageCode;
++
++  /// The [Locale] this language renders in.
++  Locale get locale => Locale(languageCode);
++
++  /// The language stored as [code], or null if [code] names none.
++  ///
++  /// Null rather than a throw or a silent default: a row holding something
++  /// unrecognisable is a corrupt setting, and the caller — [resolveLanguage] —
++  /// treats it as "no choice recorded" and re-derives from the device.
++  static AppLanguage? forCode(String? code) {
++    for (final language in AppLanguage.values) {
++      if (language.languageCode == code) {
++        return language;
++      }
++    }
++    return null;
++  }
++
++  /// The language [locale] is written in, defaulting to [AppLanguage.bangla].
++  ///
++  /// Only the language subtag is considered: `en_GB`, `en_US` and `en` are all
++  /// English, and everything that is not English is Bangla.
++  static AppLanguage forLocale(Locale locale) =>
++      forCode(locale.languageCode) ?? AppLanguage.bangla;
++}
++
++/// The locales the app declares to the framework.
++///
++/// Bangla first. `supportedLocales.first` is what Flutter's own resolution
++/// falls back to when it can match nothing, so the order is the default.
++const List<Locale> supportedLocales = <Locale>[Locale('bn'), Locale('en')];
++
++/// Which language to render in.
++///
++/// The rule, in order:
++///
++/// 1. An explicit [storedChoice] wins, whatever the device says. A user who
++///    picked English keeps English on a Bangla phone, and the reverse.
++/// 2. Otherwise, English **only** if the device's primary locale is English.
++/// 3. Otherwise Bangla.
++///
++/// Step 3 is the point of the story and the thing that is easy to get subtly
++/// wrong. The rule is *not* "Bangla if the device says Bangla, else English".
++/// A phone set to Arabic, Hindi or Spanish gets Bangla, because Jotno is a
++/// Bangla product and English is the exception it makes, not the ground state.
++/// A Bangladeshi user on a phone set to English is the common case, and that
++/// user has opted out explicitly — which is why English is read off the device
++/// at all.
++///
++/// Only [deviceLocales]`.first` is consulted. Using the whole preference list
++/// would resolve `[ar, en]` — an Arabic speaker who also reads English — to
++/// English, which is exactly the fallback this rule exists to refuse.
++AppLanguage resolveLanguage({
++  AppLanguage? storedChoice,
++  List<Locale> deviceLocales = const <Locale>[],
++}) {
++  if (storedChoice != null) {
++    return storedChoice;
++  }
++  if (deviceLocales.isEmpty) {
++    return AppLanguage.bangla;
++  }
++  return deviceLocales.first.languageCode == AppLanguage.english.languageCode
++      ? AppLanguage.english
++      : AppLanguage.bangla;
++}
++
++/// Where the user's language choice is kept between launches.
++///
++/// An interface rather than a direct database call so that [LocaleController]
++/// can be driven in a widget test without an encrypted SQLite file, and so
++/// that the one surface which *cannot* have a store — the startup error
++/// surface, which renders precisely when the database will not open — is a
++/// missing implementation rather than a special case inside the controller.
++///
++/// Reads and writes return an [AppResult]: a settings row is storage like any
++/// other, and a failure to read it must degrade to "no choice recorded"
++/// rather than take the app down. See `DatabaseLanguageStore`.
++abstract interface class LanguageStore {
++  /// The stored choice, or null if the user has never made one.
++  FutureResult<AppLanguage?> read();
++
++  /// Records [language] as the user's choice.
++  FutureResult<void> write(AppLanguage language);
++}
++
++/// The current language, and the only thing permitted to change it.
++///
++/// A [ChangeNotifier] rather than a Riverpod provider because Riverpod is not
++/// a dependency yet and this story may not add one. When it arrives, this
++/// class is what the provider exposes; nothing about the surfaces changes.
++///
++/// Listeners are notified before the write completes — see [setLanguage].
++final class LocaleController extends ChangeNotifier {
++  /// Creates a controller already resolved to [language].
++  ///
++  /// Prefer [LocaleController.load], which applies [resolveLanguage] to a
++  /// stored choice read from [store]. This constructor exists for the tests
++  /// and for the callers that have no store at all.
++  factory LocaleController({
++    required AppLanguage language,
++    LanguageStore? store,
++  }) => LocaleController._(language, store);
++
++  LocaleController._(this._language, this._store);
++
++  /// Reads the stored choice and resolves the language to render in.
++  ///
++  /// A read failure is not an error the user can act on and must not stop the
++  /// app: it degrades to "no choice recorded", which resolves from
++  /// [deviceLocales] exactly as a fresh install does.
++  static Future<LocaleController> load({
++    required LanguageStore store,
++    List<Locale> deviceLocales = const <Locale>[],
++  }) async {
++    final stored = (await store.read()).valueOr(null);
++    return LocaleController(
++      language: resolveLanguage(
++        storedChoice: stored,
++        deviceLocales: deviceLocales,
++      ),
++      store: store,
++    );
++  }
++
++  final LanguageStore? _store;
++  AppLanguage _language;
++
++  /// The language every surface under this controller renders in.
++  AppLanguage get language => _language;
++
++  /// The locale to hand to `MaterialApp`.
++  Locale get locale => _language.locale;
++
++  /// Switches to [language] and persists the choice.
++  ///
++  /// Notifies listeners first and awaits the write second, deliberately. The
++  /// switch is a display change with no data at stake; making the reader watch
++  /// a disk write before the screen turns over would be the wrong trade, and
++  /// the write is a settings row, not a record.
++  ///
++  /// The returned result reports whether the choice will survive a relaunch.
++  /// A caller that ignores it gets a language switch that works until the app
++  /// is closed, which is the correct degradation and not a crash.
++  FutureResult<void> setLanguage(AppLanguage language) async {
++    if (_language != language) {
++      _language = language;
++      notifyListeners();
++    }
++    final store = _store;
++    if (store == null) {
++      return const Success<void, AppFailure>(null);
++    }
++    return store.write(language);
++  }
++}
++
++/// A [LanguageStore] backed by nothing, for surfaces that have no database.
++///
++/// Reads report no stored choice; writes succeed and are forgotten. Used by
++/// tests and available to any future surface that must render before storage
++/// exists.
++final class EphemeralLanguageStore implements LanguageStore {
++  /// Creates a store that starts with [language] recorded, or nothing.
++  EphemeralLanguageStore([this._language]);
++
++  AppLanguage? _language;
++
++  @override
++  FutureResult<AppLanguage?> read() async =>
++      Success<AppLanguage?, AppFailure>(_language);
++
++  @override
++  FutureResult<void> write(AppLanguage language) async {
++    _language = language;
++    return const Success<void, AppFailure>(null);
++  }
++}
++
++/// Converts a settings-row read or write into an [AppResult].
++///
++/// Exposed so `DatabaseLanguageStore` and any future setting share one
++/// classification: anything the store throws is a [StorageFailure], because
++/// from the reader's point of view the difference between a locked file and a
++/// disk error is nothing they can act on.
++FutureResult<T> guardSettingAccess<T>(Future<T> Function() operation) =>
++    Boundary.guardAsync(operation, onError: (_) => const StorageFailure());
+diff --git a/jotno/lib/core/l10n/number_format.dart b/jotno/lib/core/l10n/number_format.dart
+new file mode 100644
+index 0000000..ce40033
+--- /dev/null
++++ b/jotno/lib/core/l10n/number_format.dart
+@@ -0,0 +1,89 @@
++import 'package:flutter/widgets.dart';
++import 'package:intl/intl.dart' as intl;
++
++import 'locale_controller.dart';
++
++/// The one way a number reaches a Jotno screen.
++///
++/// A dose, a reading, a count, a schema version — every one of them goes
++/// through here, and a raw `toString()` or `'$value'` on a number in a widget
++/// is a review failure. This is not a style preference. The reader of this app
++/// reads Bengali numerals (০–৯), and a screen that mixes `১২৪` in one row with
++/// `124` in the next is not a Bangla product with a translation applied; it is
++/// an English product leaking through.
++///
++/// The rule is enforceable precisely because there is one entry point. If the
++/// digit mapping is ever wrong it is wrong in one place, and the tests in
++/// `test/core/l10n/number_format_test.dart` are looking at that place.
++///
++/// **Why `intl` rather than a digit table.** `NumberFormat` carries the whole
++/// locale's numbering conventions, not just its digits: `bn` groups in the
++/// Indian style (`১,২৩,৪৫৬` — thousand, then lakh, then crore), which a
++/// hand-rolled character substitution over an English-grouped string would get
++/// wrong at exactly the sizes where a misread matters. The digits come out of
++/// the same table.
++@immutable
++final class AppNumberFormat {
++  const AppNumberFormat._(this._languageCode);
++
++  /// The formatter for [locale].
++  ///
++  /// Any locale that is not one Jotno ships falls back to Bangla, matching
++  /// [resolveLanguage]: the default is Bangla, never English.
++  factory AppNumberFormat.of(Locale locale) =>
++      AppNumberFormat.forLanguage(AppLanguage.forLocale(locale));
++
++  /// The formatter for [language].
++  factory AppNumberFormat.forLanguage(AppLanguage language) =>
++      AppNumberFormat._(language.languageCode);
++
++  /// The `intl` locale name the patterns below are built for.
++  final String _languageCode;
++
++  /// Cached [intl.NumberFormat] instances.
++  ///
++  /// Constructing one parses a pattern and looks up the locale's symbols, and
++  /// these are called once per number per frame. Keyed by language code and
++  /// fraction digits, both of which are closed sets.
++  static final Map<String, intl.NumberFormat> _cache =
++      <String, intl.NumberFormat>{};
++
++  intl.NumberFormat _formatter({required int fractionDigits}) {
++    return _cache.putIfAbsent('$_languageCode:$fractionDigits', () {
++      final format = intl.NumberFormat.decimalPattern(_languageCode);
++      format.minimumFractionDigits = fractionDigits;
++      format.maximumFractionDigits = fractionDigits;
++      return format;
++    });
++  }
++
++  /// Renders a whole number: `124` becomes `১২৪` in Bangla, `124` in English.
++  String integer(int value) => _formatter(fractionDigits: 0).format(value);
++
++  /// Renders [value] with exactly [fractionDigits] after the decimal point.
++  ///
++  /// Fixed rather than "up to", because a column of readings where one row
++  /// shows `৩৬.৫` and the next `৩৭` does not scan as a column.
++  String decimal(num value, {int fractionDigits = 1}) =>
++      _formatter(fractionDigits: fractionDigits).format(value);
++}
++
++/// Reaching the formatter for the locale currently in force.
++extension AppNumberFormatOnContext on BuildContext {
++  /// The number formatter for this subtree's locale.
++  ///
++  /// `context.numbers.integer(count)` is the whole idiom.
++  AppNumberFormat get numbers =>
++      AppNumberFormat.of(Localizations.localeOf(this));
++}
++
++/// The font features every numeric run in Jotno sets.
++///
++/// Tabular figures give each digit the same advance width, so a column of
++/// readings lines up on the decimal point instead of drifting. Applied here as
++/// a bare constant rather than through the theme because the theme is Story
++/// 1.4's; when it lands, its numeric text styles should be built from this
++/// list rather than repeating it.
++const List<FontFeature> tabularFigures = <FontFeature>[
++  FontFeature.tabularFigures(),
++];
+diff --git a/jotno/lib/core/l10n/text_metrics.dart b/jotno/lib/core/l10n/text_metrics.dart
+new file mode 100644
+index 0000000..a3dea49
+--- /dev/null
++++ b/jotno/lib/core/l10n/text_metrics.dart
+@@ -0,0 +1,72 @@
++/// The line-height rule, which is the most consequential typographic decision
++/// in the product.
++///
++/// Bangla needs a taller line box than Latin at the same size: the script
++/// carries matras above the baseline and descenders below it, and conjuncts
++/// (যুক্তাক্ষর) stack. Body text therefore sets **15/26 in Bangla against
++/// 15/24 in English**.
++///
++/// The second half of the rule matters more than the first. Every container is
++/// sized to the *Bangla* measure — [banglaBodyLineHeight], not the English one
++/// — so switching language changes the glyphs and nothing else. Without it the
++/// English build would be the one laid out correctly and the Bangla build the
++/// one that reflows, wraps differently and pushes a control off screen, which
++/// is precisely the retrofit this story exists to avoid.
++///
++/// This is the metric layer only. The colours, weights and the rest of the
++/// type scale are Story 1.4's, and when that theme lands it should build its
++/// body styles from here rather than restating the numbers.
++library;
++
++import 'package:flutter/material.dart';
++
++import 'locale_controller.dart';
++
++/// The body text size, in logical pixels. The same in both languages.
++const double bodyFontSize = 15;
++
++/// The Bangla body line height, in logical pixels.
++///
++/// **This is the measure every container reserves**, in both languages. It is
++/// the taller of the two, so a layout that fits Bangla fits English, and the
++/// English build reads as slightly generous rather than the Bangla build
++/// reading as cramped.
++const double banglaBodyLineHeight = 26;
++
++/// The English body line height, in logical pixels.
++///
++/// Applied to the text itself so English is not artificially airy inside its
++/// own line box. Never used to size a container — see [banglaBodyLineHeight].
++const double englishBodyLineHeight = 24;
++
++/// The body line height for [language], in logical pixels.
++double bodyLineHeightFor(AppLanguage language) => switch (language) {
++  AppLanguage.bangla => banglaBodyLineHeight,
++  AppLanguage.english => englishBodyLineHeight,
++};
++
++/// The body text style for [language].
++///
++/// `TextStyle.height` is a multiple of the font size, so the ratio is computed
++/// rather than written out: 26/15 and 24/15 are not numbers anyone should be
++/// asked to keep in sync by hand.
++TextStyle bodyTextStyle(AppLanguage language) => TextStyle(
++  fontSize: bodyFontSize,
++  height: bodyLineHeightFor(language) / bodyFontSize,
++);
++
++/// The height a container must reserve for [lines] lines of body text.
++///
++/// Always the Bangla measure, whatever language is rendering. A container
++/// sized from the active language would be the reflow this rule forbids.
++double banglaBodyMeasure(int lines) => banglaBodyLineHeight * lines;
++
++/// A [TextTheme] whose body styles carry the [language] line height.
++///
++/// Applied to both startup surfaces in `main.dart`. Story 1.4 replaces this
++/// with the full scale; until then it is what makes the rule true on screen
++/// rather than merely documented.
++TextTheme bodyTextTheme(AppLanguage language) {
++  final style = bodyTextStyle(language);
++  return TextTheme(bodyLarge: style, bodyMedium: style, bodySmall: style);
++}
+diff --git a/jotno/lib/l10n/.gitkeep b/jotno/lib/l10n/.gitkeep
+deleted file mode 100644
+index 2cfd7c6..0000000
+--- a/jotno/lib/l10n/.gitkeep
++++ /dev/null
+@@ -1,2 +0,0 @@
+-# Placeholder so the mandated source tree survives in git.
+-# Remove once this directory has real content.
+diff --git a/jotno/lib/l10n/app_bn.arb b/jotno/lib/l10n/app_bn.arb
+new file mode 100644
+index 0000000..a302e43
+--- /dev/null
++++ b/jotno/lib/l10n/app_bn.arb
+@@ -0,0 +1,66 @@
++{
++  "@@locale": "bn",
++  "appTitle": "যত্ন",
++  "@appTitle": {
++    "description": "The application name, shown in the task switcher and as the MaterialApp title."
++  },
++  "databaseReady": "এনক্রিপ্ট করা ডেটাবেস স্কিমা সংস্করণ {version}-এ খোলা আছে।",
++  "@databaseReady": {
++    "description": "The only thing the app renders once the encrypted database is open, until the first real screen lands. Placeholder-driven so the schema number goes through the shared number formatter.",
++    "placeholders": {
++      "version": {
++        "type": "String",
++        "description": "The schema version, already rendered by AppNumberFormat. A String and not an int on purpose: every number in this app reaches the UI through one formatter, so ICU must never format one itself.",
++        "example": "১"
++      }
++    }
++  },
++  "startupFailureTitle": "যত্ন চালু হতে পারছে না",
++  "@startupFailureTitle": {
++    "description": "Heading of the surface shown when the encrypted database cannot be opened."
++  },
++  "startupFailureMissingCipher": "এই বিল্ডে এনক্রিপশন ছাড়া SQLite লাইব্রেরি এসেছে, তাই আপনার রেকর্ড সুরক্ষিত থাকত না। এই অবস্থায় যত্ন ডেটাবেস খুলবে না। অফিসিয়াল বিল্ড থেকে আবার ইনস্টল করুন।",
++  "@startupFailureMissingCipher": {
++    "description": "The shipped SQLite library is not the SQLite3MultipleCiphers build, so the database would be written in plaintext."
++  },
++  "startupFailureEmptyKey": "যত্ন-কে একটি খালি ডেটাবেস কী দেওয়া হয়েছে, যা আপনার রেকর্ড এনক্রিপ্ট না করেই রেখে দিত। এই অবস্থায় যত্ন ডেটাবেস খুলবে না।",
++  "@startupFailureEmptyKey": {
++    "description": "The database key was empty, which in SQLite3MultipleCiphers leaves the file unencrypted rather than failing."
++  },
++  "startupFailureDevelopmentKeyInRelease": "এই বিল্ডে এমন একটি ডেভেলপমেন্ট কী ব্যবহার হয়েছে যা প্রতিটি ইনস্টলে একই। এই অবস্থায় যত্ন ডেটাবেস খুলবে না। অফিসিয়াল বিল্ড থেকে আবার ইনস্টল করুন।",
++  "@startupFailureDevelopmentKeyInRelease": {
++    "description": "A release build reached the development key provider, so every install would share one key."
++  },
++  "startupFailureKeyRejected": "এই ফোনে থাকা ডেটাবেস হাতে থাকা কী দিয়ে খোলা যায়নি। আপনার রেকর্ড এখনও ফোনে এনক্রিপ্ট করা আছে এবং বদলায়নি।",
++  "@startupFailureKeyRejected": {
++    "description": "The cipher is present but the key does not unlock the existing database file."
++  },
++  "startupFailureTimedOut": "এই ফোনে যত্ন চালু হওয়া শেষ করতে পারেনি। কোনো তথ্য বদলায়নি। অ্যাপটি আবার খুলে দেখুন।",
++  "@startupFailureTimedOut": {
++    "description": "Startup did not finish inside the watchdog timeout."
++  },
++  "startupFailureUnknown": "এই ফোনে ডেটাবেস খোলা যায়নি।",
++  "@startupFailureUnknown": {
++    "description": "Anything else — corruption, a locked file, an I/O error. Deliberately says nothing it cannot prove."
++  },
++  "failureStorage": "এই ফোনে তথ্য সংরক্ষণ করা যায়নি। আপনার রেকর্ড বদলায়নি।",
++  "@failureStorage": {
++    "description": "StorageFailure — the local database itself failed: disk full, file locked, I/O error."
++  },
++  "failureValidation": "এই তথ্য সংরক্ষণ করা যায়নি। যা লিখেছেন তা দেখে আবার চেষ্টা করুন।",
++  "@failureValidation": {
++    "description": "ValidationFailure — input was rejected before anything was written. Names no field and no value, because both are health data by default."
++  },
++  "failureNotFound": "এই রেকর্ডটি আর এই ফোনে নেই।",
++  "@failureNotFound": {
++    "description": "NotFoundFailure — the requested record does not exist, or is soft-deleted."
++  },
++  "failurePermission": "এই কাজের জন্য যে অনুমতি দরকার, যত্ন-এর তা নেই। ফোনের সেটিংস থেকে অনুমতিটি দিতে পারেন।",
++  "@failurePermission": {
++    "description": "PermissionFailure — the operating system withheld a permission the operation needed."
++  },
++  "failureUnexpected": "কিছু একটা ভুল হয়েছে। কোনো তথ্য বদলায়নি।",
++  "@failureUnexpected": {
++    "description": "UnexpectedFailure — something nobody anticipated happened inside a boundary."
++  }
++}
+\ No newline at end of file
+diff --git a/jotno/lib/l10n/app_en.arb b/jotno/lib/l10n/app_en.arb
+new file mode 100644
+index 0000000..869706e
+--- /dev/null
++++ b/jotno/lib/l10n/app_en.arb
+@@ -0,0 +1,31 @@
++{
++  "@@locale": "en",
++
++  "appTitle": "Jotno",
++
++  "databaseReady": "The encrypted database is open at schema version {version}.",
++
++  "startupFailureTitle": "Jotno cannot start",
++
++  "startupFailureMissingCipher": "This build shipped an unencrypted SQLite library, so your records would not be protected. Jotno will not open the database in that state. Reinstall from an official build.",
++
++  "startupFailureEmptyKey": "Jotno was given an empty database key, which would leave your records unencrypted. Jotno will not open the database in that state.",
++
++  "startupFailureDevelopmentKeyInRelease": "This build uses a development key that is the same on every install. Jotno will not open the database in that state. Reinstall from an official build.",
++
++  "startupFailureKeyRejected": "The database on this device could not be unlocked with the key available. Your records are still encrypted on disk and have not been changed.",
++
++  "startupFailureTimedOut": "Jotno could not finish starting up on this device. Nothing has been changed. Try opening the app again.",
++
++  "startupFailureUnknown": "The database could not be opened on this device.",
++
++  "failureStorage": "Something went wrong saving to this device. Your records have not been changed.",
++
++  "failureValidation": "That could not be saved. Check what you entered and try again.",
++
++  "failureNotFound": "That record is no longer on this device.",
++
++  "failurePermission": "Jotno does not have the permission this needs. You can grant it in your phone's settings.",
++
++  "failureUnexpected": "Something went wrong. Nothing has been changed."
++}
+diff --git a/jotno/lib/main.dart b/jotno/lib/main.dart
+index d39759f..2e4cc17 100644
+--- a/jotno/lib/main.dart
++++ b/jotno/lib/main.dart
+@@ -5,9 +5,13 @@ import 'package:flutter/material.dart';
+ import 'core/database/app_database.dart';
+ import 'core/database/connection.dart';
+ import 'core/database/database_key.dart';
++import 'core/l10n/locale_controller.dart';
++import 'core/l10n/number_format.dart';
++import 'core/l10n/text_metrics.dart';
+ import 'core/logging/analytics_events.dart';
+ import 'core/logging/app_logger.dart';
+ import 'core/result/app_failure.dart';
++import 'l10n/app_localizations.dart';
+ 
+ /// How long startup may take before the app gives up and says so.
+ ///
+@@ -43,8 +47,10 @@ Future<Widget> startupSurface({
+   AppLogger logger = const AppLogger(),
+   Future<AppDatabase> Function() open = _openDatabase,
+   Duration timeout = startupTimeout,
++  List<Locale>? deviceLocales,
+ }) async {
+   final stopwatch = Stopwatch()..start();
++  final locales = deviceLocales ?? platformLocales();
+ 
+   try {
+     final database = await open().timeout(timeout);
+@@ -53,8 +59,16 @@ Future<Widget> startupSurface({
+       elapsed: stopwatch.elapsed,
+       succeeded: true,
+     );
++    // Only now — with the database proven open — can the stored language
++    // choice be read. A failure to read it degrades to the device-derived
++    // default inside `load`; it is a settings row, not a reason to refuse to
++    // start.
++    final localeController = await LocaleController.load(
++      store: DatabaseLanguageStore(database),
++      deviceLocales: locales,
++    );
+     logger.event(AnalyticsEvent.appOpened, elapsed: stopwatch.elapsed);
+-    return JotnoApp(database: database);
++    return JotnoApp(database: database, localeController: localeController);
+   } on TimeoutException {
+     logger.event(
+       AnalyticsEvent.appStartupFailed,
+@@ -62,7 +76,10 @@ Future<Widget> startupSurface({
+       succeeded: false,
+       failure: const UnexpectedFailure(errorType: TimeoutException),
+     );
+-    return const DatabaseUnavailableApp(reason: StartupFailure.timedOut);
++    return DatabaseUnavailableApp(
++      reason: StartupFailure.timedOut,
++      deviceLocales: locales,
++    );
+   } on Object catch (error) {
+     // A database that cannot be opened encrypted is not a recoverable state.
+     // Show why, on screen, instead of a black rectangle.
+@@ -77,10 +94,29 @@ Future<Widget> startupSurface({
+       succeeded: false,
+       failure: UnexpectedFailure.from(error),
+     );
+-    return DatabaseUnavailableApp(reason: StartupFailure.classify(error));
++    return DatabaseUnavailableApp(
++      reason: StartupFailure.classify(error),
++      deviceLocales: locales,
++    );
+   }
+ }
+ 
++/// The device's language preferences, in order.
++///
++/// This is the whole of what the startup error surface needs to localise
++/// itself: it renders when the database will not open, so there is no stored
++/// choice to read and nothing here touches storage. `main` calls
++/// `WidgetsFlutterBinding.ensureInitialized()` before anything reaches this,
++/// and a widget build is by definition later still, so the binding is always
++/// present. An empty list is not an error — [resolveLanguage] answers Bangla,
++/// which is the default anyway.
++///
++/// Read through the binding rather than `PlatformDispatcher.instance` so that
++/// `tester.platformDispatcher.localesTestValue` is what tests see, instead of
++/// whatever locale the machine running them happens to be set to.
++List<Locale> platformLocales() =>
++    WidgetsBinding.instance.platformDispatcher.locales;
++
+ /// Opens the database and proves it is usable.
+ ///
+ /// `openAppDatabase` has already verified the cipher and the key in plain
+@@ -102,12 +138,14 @@ Future<AppDatabase> _openDatabase() async {
+ /// pragma that statement *is* the key.
+ ///
+ /// This is not an `AppFailure`, and deliberately so. These failures fire
+-/// before any repository, any layer boundary or any localisation delegate
+-/// exists — there is nothing for a `Result` to cross and no ARB loaded to
+-/// resolve a key against, which is why [explanation] is a fixed English string
+-/// this surface can always render. Each reason nevertheless carries a
+-/// [localisationKey] so that when Story 1.3 wires ARB it wires one mechanism
+-/// covering startup and everything after it, rather than two.
++/// before any repository or layer boundary exists, so there is nothing for a
++/// `Result` to cross. They are localised all the same — [explain] resolves
++/// each reason against the ARB — but from the *device* locale, never the
++/// stored choice, because the store is the database that just refused to open.
++/// [explanation] remains the fixed English fallback for the narrower case the
++/// ARB cannot cover: a failure early enough that the delegates have not
++/// loaded. A surface whose entire job is to explain a failure must not itself
++/// have a way to fail.
+ enum StartupFailure {
+   /// The shipped SQLite library is not the SQLite3MultipleCiphers build.
+   missingCipher(
+@@ -163,11 +201,17 @@ enum StartupFailure {
+     required this.explanation,
+   });
+ 
+-  /// The ARB key naming the message for this reason, wired in Story 1.3.
++  /// The ARB key naming the message for this reason.
+   ///
+   /// A literal constant, like every `AppFailure` key, rather than something
+   /// derived from the enum's `name`: renaming a constant or obfuscating a
+   /// release build must not change which string a reader sees.
++  ///
++  /// [explain] resolves the message by `switch` rather than by this key, since
++  /// `AppLocalizations` generates a getter per message and not a map. The key
++  /// remains the contract: `test/core/l10n/localised_surfaces_test.dart`
++  /// checks every one of these exists in both ARB files, and
++  /// `tool/l10n_parity_gate.sh` checks the two files agree.
+   final String localisationKey;
+ 
+   /// What to tell the reader. Never contains anything derived from the key.
+@@ -177,6 +221,29 @@ enum StartupFailure {
+   /// being loaded at all.
+   final String explanation;
+ 
++  /// This reason's message in [strings]' language, or [explanation] if there
++  /// are no localisations to read.
++  ///
++  /// A `switch` over the enum rather than a lookup by [localisationKey],
++  /// because `AppLocalizations` exposes a getter per message and not a map —
++  /// and that is the better arrangement anyway: adding a reason above without
++  /// adding its message here does not compile, which is exactly what the
++  /// parity gate does for the two ARB files.
++  String explain(AppLocalizations? strings) {
++    if (strings == null) {
++      return explanation;
++    }
++    return switch (this) {
++      StartupFailure.missingCipher => strings.startupFailureMissingCipher,
++      StartupFailure.emptyKey => strings.startupFailureEmptyKey,
++      StartupFailure.developmentKeyInRelease =>
++        strings.startupFailureDevelopmentKeyInRelease,
++      StartupFailure.keyRejected => strings.startupFailureKeyRejected,
++      StartupFailure.timedOut => strings.startupFailureTimedOut,
++      StartupFailure.unknown => strings.startupFailureUnknown,
++    };
++  }
++
+   /// Maps a startup [error] onto the reason to display.
+   ///
+   /// Classification is by type, not by matching message text, so renaming a
+@@ -193,27 +260,78 @@ enum StartupFailure {
+   }
+ }
+ 
++/// The heading of the startup failure surface, in English.
++///
++/// The counterpart of [StartupFailure.explanation]: the fallback for the case
++/// where the localisations themselves are not available. Kept identical to
++/// `startupFailureTitle` in `app_en.arb`, which
++/// `test/core/l10n/localised_surfaces_test.dart` enforces.
++const String startupFailureFallbackTitle = 'Jotno cannot start';
++
+ /// The application, once the encrypted database is open.
++///
++/// A [ListenableBuilder] over [localeController] wraps the whole
++/// [MaterialApp], so switching language rebuilds every string in the tree
++/// without a restart. Wrapping the app rather than sitting inside it is the
++/// point: `Localizations` is rebuilt from the new `locale`, and nothing below
++/// has to know a switch happened.
+ class JotnoApp extends StatelessWidget {
+-  /// Creates the app over an open [database].
+-  const JotnoApp({required this.database, super.key});
++  /// Creates the app over an open [database] in [localeController]'s language.
++  const JotnoApp({
++    required this.database,
++    required this.localeController,
++    super.key,
++  });
+ 
+   /// The open, encrypted database.
+   final AppDatabase database;
+ 
++  /// The language every string below renders in.
++  final LocaleController localeController;
++
+   @override
+   Widget build(BuildContext context) {
+-    return MaterialApp(
+-      title: 'Jotno',
+-      debugShowCheckedModeBanner: false,
+-      home: const Scaffold(
+-        body: Center(
+-          child: Padding(
+-            padding: EdgeInsets.all(24),
+-            child: Text(
+-              'The encrypted database is open at schema version 1.',
+-              textAlign: TextAlign.center,
+-            ),
++    return ListenableBuilder(
++      listenable: localeController,
++      builder: (context, _) {
++        final language = localeController.language;
++        return MaterialApp(
++          onGenerateTitle: (context) => AppLocalizations.of(context)!.appTitle,
++          debugShowCheckedModeBanner: false,
++          locale: language.locale,
++          localizationsDelegates: AppLocalizations.localizationsDelegates,
++          supportedLocales: supportedLocales,
++          theme: ThemeData(textTheme: bodyTextTheme(language)),
++          home: _DatabaseReadyScreen(schemaVersion: database.schemaVersion),
++        );
++      },
++    );
++  }
++}
++
++/// The placeholder the app renders until the first real screen lands.
++///
++/// Its one job beyond saying the database opened is to put a number on screen
++/// through [AppNumberFormat], so the rule that no widget calls `toString()` on
++/// a number is true from the first pixel this app ever draws rather than
++/// adopted later.
++class _DatabaseReadyScreen extends StatelessWidget {
++  const _DatabaseReadyScreen({required this.schemaVersion});
++
++  /// The schema version the open database reports.
++  final int schemaVersion;
++
++  @override
++  Widget build(BuildContext context) {
++    final strings = AppLocalizations.of(context)!;
++    return Scaffold(
++      body: Center(
++        child: Padding(
++          padding: const EdgeInsets.all(24),
++          child: Text(
++            strings.databaseReady(context.numbers.integer(schemaVersion)),
++            textAlign: TextAlign.center,
++            style: TextStyle(fontFeatures: tabularFigures),
+           ),
+         ),
+       ),
+@@ -223,36 +341,83 @@ class JotnoApp extends StatelessWidget {
+ 
+ /// The surface shown when the database refuses to open.
+ ///
+-/// Intentionally unlocalised: this can fire before anything else is ready.
++/// Localised, but **not** from the stored language choice — it renders exactly
++/// when the database that holds that choice will not open. It resolves from
++/// the device locale instead, which is the trade the story names: this surface
++/// has six fixed strings, and showing a user who picked English the Bangla
++/// error once on a broken build costs less than keeping that one setting
++/// outside the encrypted database.
++///
++/// Every string here falls back to the fixed English constants
++/// ([StartupFailure.explanation], [startupFailureFallbackTitle]) if
++/// `AppLocalizations.of` returns null. That is not defensive noise: a failure
++/// this early can precede the delegates loading, and a surface whose whole
++/// purpose is to explain a failure must not fail to render.
+ class DatabaseUnavailableApp extends StatelessWidget {
+   /// Creates the failure surface for [reason].
+-  const DatabaseUnavailableApp({required this.reason, super.key});
++  ///
++  /// [deviceLocales] defaults to the platform's own list; tests and
++  /// [startupSurface] pass it explicitly.
++  const DatabaseUnavailableApp({
++    required this.reason,
++    this.deviceLocales,
++    super.key,
++  });
+ 
+   /// Why the database could not be opened.
+   final StartupFailure reason;
+ 
++  /// The device's language preferences. Null means ask the platform.
++  final List<Locale>? deviceLocales;
++
+   @override
+   Widget build(BuildContext context) {
++    final language = resolveLanguage(
++      deviceLocales: deviceLocales ?? platformLocales(),
++    );
+     return MaterialApp(
+-      title: 'Jotno',
++      onGenerateTitle: (context) =>
++          AppLocalizations.of(context)?.appTitle ?? 'Jotno',
+       debugShowCheckedModeBanner: false,
+-      home: Scaffold(
+-        body: SafeArea(
+-          child: Center(
+-            child: SingleChildScrollView(
+-              padding: const EdgeInsets.all(24),
+-              child: Column(
+-                mainAxisSize: MainAxisSize.min,
+-                crossAxisAlignment: CrossAxisAlignment.start,
+-                children: [
+-                  const Text(
+-                    'Jotno cannot start',
+-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
++      locale: language.locale,
++      localizationsDelegates: AppLocalizations.localizationsDelegates,
++      supportedLocales: supportedLocales,
++      theme: ThemeData(textTheme: bodyTextTheme(language)),
++      home: _StartupFailureScreen(reason: reason),
++    );
++  }
++}
++
++class _StartupFailureScreen extends StatelessWidget {
++  const _StartupFailureScreen({required this.reason});
++
++  final StartupFailure reason;
++
++  @override
++  Widget build(BuildContext context) {
++    final strings = AppLocalizations.of(context);
++    return Scaffold(
++      body: SafeArea(
++        child: Center(
++          child: SingleChildScrollView(
++            padding: const EdgeInsets.all(24),
++            child: Column(
++              mainAxisSize: MainAxisSize.min,
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(
++                  strings?.startupFailureTitle ?? startupFailureFallbackTitle,
++                  style: const TextStyle(
++                    fontSize: 22,
++                    fontWeight: FontWeight.w600,
+                   ),
+-                  const SizedBox(height: 12),
+-                  Text(reason.explanation),
+-                ],
+-              ),
++                ),
++                const SizedBox(height: 12),
++                // Wraps rather than truncates. Every one of these messages
++                // ends in what to do about it, and an ellipsis would eat that
++                // sentence.
++                Text(reason.explain(strings)),
++              ],
+             ),
+           ),
+         ),
+diff --git a/jotno/pubspec.yaml b/jotno/pubspec.yaml
+index 19cf54c..60e1c4c 100644
+--- a/jotno/pubspec.yaml
++++ b/jotno/pubspec.yaml
+@@ -32,8 +32,18 @@ hooks:
+ dependencies:
+   flutter:
+     sdk: flutter
++  # Ships with the SDK. Supplies the Material, Cupertino and Widgets
++  # localisation delegates for `bn`, which the generated `AppLocalizations`
++  # delegate sits alongside in `main.dart`.
++  flutter_localizations:
++    sdk: flutter
+ 
+   drift: ^2.34.2
++  # Version deliberately unconstrained: `flutter_localizations` pins `intl`
++  # exactly, and any caret range here would sooner or later contradict it and
++  # make the whole solve fail. `pubspec.lock` is the pin, and CI resolves with
++  # `--enforce-lockfile`.
++  intl: any
+   path_provider: ^2.1.6
+   sqlite3: ^3.5.0
+ 
+@@ -49,3 +59,8 @@ dev_dependencies:
+ 
+ flutter:
+   uses-material-design: true
++
++  # Runs `gen-l10n` on `pub get` and before every build, using `l10n.yaml`.
++  # The generated sources are committed, so `flutter analyze` and the editor
++  # see the same `AppLocalizations` CI does.
++  generate: true
+diff --git a/jotno/test/core/database/encryption_test.dart b/jotno/test/core/database/encryption_test.dart
+index 58ee7a0..64d3e8a 100644
+--- a/jotno/test/core/database/encryption_test.dart
++++ b/jotno/test/core/database/encryption_test.dart
+@@ -436,11 +436,15 @@ void main() {
+   });
+ 
+   group('AppDatabase over an encrypted connection', () {
+-    test('creates schema v1 and round-trips a row', () async {
++    test('creates the current schema and round-trips a row', () async {
+       final database = _openAppDatabase(dbFile, 'a-plain-key');
+       addTearDown(database.close);
+ 
+-      expect(database.schemaVersion, 1);
++      // Story 1.3 added the settings table, taking the schema to v2. The
++      // number is asserted rather than ignored because a bump that skipped
++      // `drift_dev make-migrations` must not slip through, and the generated
++      // tests under `test/migration/` are what prove the step itself.
++      expect(database.schemaVersion, 2);
+ 
+       await _insertSmokeRow(database, '0199a0c8-0000-7000-8000-000000000001');
+ 
+diff --git a/jotno/test/core/l10n/l10n_parity_gate_test.dart b/jotno/test/core/l10n/l10n_parity_gate_test.dart
+new file mode 100644
+index 0000000..e8a6b40
+--- /dev/null
++++ b/jotno/test/core/l10n/l10n_parity_gate_test.dart
+@@ -0,0 +1,185 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++
++/// A gate nobody has watched fail is not a gate.
++///
++/// This runs `tool/l10n_parity_gate.sh` — the same script CI runs — against
++/// deliberately unbalanced ARB pairs and asserts that it fails, names the
++/// missing key, and names the file it is missing from. It also runs it against
++/// the real `lib/l10n`, so the suite fails the moment the two locales diverge
++/// rather than waiting for CI.
++///
++/// The script takes its ARB directory as an argument precisely so this test
++/// can point it at a temporary one instead of the repository.
++void main() {
++  const gate = 'tool/l10n_parity_gate.sh';
++
++  late Directory scratch;
++
++  setUpAll(() {
++    if (!File(gate).existsSync()) {
++      fail(
++        'cannot find $gate from ${Directory.current.path}. These tests run the '
++        'real gate script, so they must be run with the package root as the '
++        'working directory — `flutter test` from jotno/ does that.',
++      );
++    }
++    try {
++      final probe = Process.runSync('bash', ['-c', 'exit 0']);
++      if (probe.exitCode != 0) {
++        fail('bash is present but exited ${probe.exitCode} on a no-op.');
++      }
++    } on ProcessException catch (error) {
++      fail(
++        'bash is not available on this machine (${error.message}). The gate '
++        'is a bash script and CI runs it on ubuntu-latest; there is no point '
++        'pretending these tests passed.',
++      );
++    }
++  });
++
++  setUp(() {
++    scratch = Directory.systemTemp.createTempSync('l10n_parity_gate');
++  });
++
++  tearDown(() {
++    if (scratch.existsSync()) {
++      scratch.deleteSync(recursive: true);
++    }
++  });
++
++  /// Runs the gate. With no argument it checks the real `lib/l10n`, exactly as
++  /// CI invokes it.
++  Future<ProcessResult> runGate([String? arbDir]) =>
++      Process.run('bash', [gate, ?arbDir]);
++
++  void writeArb(String name, Map<String, Object?> content) {
++    File('${scratch.path}/$name')
++        .writeAsStringSync(const JsonEncoder.withIndent('  ').convert(content));
++  }
++
++  String outputOf(ProcessResult result) => '${result.stdout}${result.stderr}';
++
++  test('the real lib/l10n passes', () async {
++    final result = await runGate();
++
++    expect(result.exitCode, 0, reason: outputOf(result));
++  });
++
++  test('a balanced pair passes', () async {
++    writeArb('app_bn.arb', {'@@locale': 'bn', 'greeting': 'হ্যালো'});
++    writeArb('app_en.arb', {'@@locale': 'en', 'greeting': 'Hello'});
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 0, reason: outputOf(result));
++  });
++
++  test('a key only in Bangla fails, naming the key and the file', () async {
++    // The acceptance criterion, proven by planting one rather than assumed.
++    writeArb('app_bn.arb', {
++      '@@locale': 'bn',
++      'greeting': 'হ্যালো',
++      'onlyInBangla': 'শুধু বাংলায়',
++    });
++    writeArb('app_en.arb', {'@@locale': 'en', 'greeting': 'Hello'});
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('onlyInBangla'));
++    expect(outputOf(result), contains('app_en.arb'));
++  });
++
++  test('a key only in English fails too', () async {
++    // The likelier direction in practice: a developer adds a string to the
++    // language they are reading while they work.
++    writeArb('app_bn.arb', {'@@locale': 'bn', 'greeting': 'হ্যালো'});
++    writeArb('app_en.arb', {
++      '@@locale': 'en',
++      'greeting': 'Hello',
++      'onlyInEnglish': 'Only in English',
++    });
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('onlyInEnglish'));
++    expect(outputOf(result), contains('app_bn.arb'));
++  });
++
++  test('every missing key is named, not just the first', () async {
++    writeArb('app_bn.arb', {
++      '@@locale': 'bn',
++      'first': 'এক',
++      'second': 'দুই',
++      'third': 'তিন',
++    });
++    writeArb('app_en.arb', {'@@locale': 'en', 'second': 'Two'});
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('"first"'));
++    expect(outputOf(result), contains('"third"'));
++    expect(outputOf(result), contains('failed on 2 missing key(s)'));
++  });
++
++  test('@-metadata is not mistaken for a key', () async {
++    // A gate that cries wolf gets switched off. The template locale carries
++    // `@key` blocks — descriptions, placeholder types, examples — and the
++    // translated locale does not. That is correct ARB, not a parity failure.
++    writeArb('app_bn.arb', {
++      '@@locale': 'bn',
++      'greeting': 'হ্যালো {name}',
++      '@greeting': {
++        'description': 'A greeting',
++        'placeholders': {
++          'name': {'type': 'String', 'example': 'রেহানা'},
++        },
++      },
++    });
++    writeArb('app_en.arb', {'@@locale': 'en', 'greeting': 'Hello {name}'});
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 0, reason: outputOf(result));
++  });
++
++  test('a missing directory fails rather than passing blind', () async {
++    final result = await runGate('${scratch.path}/does-not-exist');
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('would be blind'));
++  });
++
++  test('a directory with no ARB files fails rather than passing', () async {
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('no app_*.arb files'));
++  });
++
++  test('a single locale fails rather than passing trivially', () async {
++    // One file is always internally consistent. If the second locale is
++    // deleted, the gate must notice rather than report a clean run.
++    writeArb('app_bn.arb', {'@@locale': 'bn', 'greeting': 'হ্যালো'});
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('at least two locales'));
++  });
++
++  test('unparseable JSON fails rather than being skipped', () async {
++    File('${scratch.path}/app_bn.arb').writeAsStringSync('{"greeting": ');
++    writeArb('app_en.arb', {'@@locale': 'en', 'greeting': 'Hello'});
++
++    final result = await runGate(scratch.path);
++
++    expect(result.exitCode, 1);
++    expect(outputOf(result), contains('not valid JSON'));
++  });
++}
+diff --git a/jotno/test/core/l10n/locale_controller_test.dart b/jotno/test/core/l10n/locale_controller_test.dart
+new file mode 100644
+index 0000000..91c2439
+--- /dev/null
++++ b/jotno/test/core/l10n/locale_controller_test.dart
+@@ -0,0 +1,284 @@
++import 'package:drift/native.dart';
++import 'package:flutter/widgets.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/database/app_database.dart';
++import 'package:jotno/core/l10n/locale_controller.dart';
++import 'package:jotno/core/result/app_failure.dart';
++import 'package:jotno/core/result/result.dart';
++import 'package:jotno/l10n/app_localizations.dart';
++
++/// A store whose reads fail, to prove a broken settings row cannot stop the
++/// app from starting.
++final class _FailingLanguageStore implements LanguageStore {
++  @override
++  FutureResult<AppLanguage?> read() async =>
++      const Failure<AppLanguage?, AppFailure>(StorageFailure());
++
++  @override
++  FutureResult<void> write(AppLanguage language) async =>
++      const Failure<void, AppFailure>(StorageFailure());
++}
++
++void main() {
++  group('resolveLanguage — the matrix this story exists for', () {
++    test('fresh install on a Bangla device renders Bangla', () {
++      expect(
++        resolveLanguage(deviceLocales: const [Locale('bn')]),
++        AppLanguage.bangla,
++      );
++    });
++
++    test('fresh install on an English device renders English', () {
++      expect(
++        resolveLanguage(deviceLocales: const [Locale('en')]),
++        AppLanguage.english,
++      );
++    });
++
++    test('fresh install on an Arabic device renders Bangla, not English', () {
++      // The line the whole story turns on. The rule is not "Bangla if the
++      // device says Bangla, else English" — everything that is not explicitly
++      // English gets Bangla, because Bangla is the default and English is the
++      // opt-out.
++      expect(
++        resolveLanguage(deviceLocales: const [Locale('ar')]),
++        AppLanguage.bangla,
++      );
++    });
++
++    test('a device with no locale at all renders Bangla', () {
++      expect(resolveLanguage(), AppLanguage.bangla);
++    });
++
++    test('a stored English choice beats a Bangla device', () {
++      expect(
++        resolveLanguage(
++          storedChoice: AppLanguage.english,
++          deviceLocales: const [Locale('bn')],
++        ),
++        AppLanguage.english,
++      );
++    });
++
++    test('a stored Bangla choice beats an English device', () {
++      expect(
++        resolveLanguage(
++          storedChoice: AppLanguage.bangla,
++          deviceLocales: const [Locale('en')],
++        ),
++        AppLanguage.bangla,
++      );
++    });
++
++    test('regional English variants are still English', () {
++      for (final locale in const [
++        Locale('en'),
++        Locale('en', 'US'),
++        Locale('en', 'GB'),
++        Locale('en', 'IN'),
++      ]) {
++        expect(
++          resolveLanguage(deviceLocales: [locale]),
++          AppLanguage.english,
++          reason: '$locale',
++        );
++      }
++    });
++
++    test('English further down the preference list does not win', () {
++      // An Arabic speaker whose phone also lists English is not an English
++      // reader for this app's purposes. Only the primary locale is consulted;
++      // taking the whole list would reintroduce English-as-fallback by the
++      // back door.
++      expect(
++        resolveLanguage(deviceLocales: const [Locale('ar'), Locale('en')]),
++        AppLanguage.bangla,
++      );
++    });
++  });
++
++  group('AppLanguage', () {
++    test('codes are literal constants, not the enum name', () {
++      // The code is persisted in the database. Deriving it from `name` would
++      // mean an obfuscated release build, or a rename, silently repointed
++      // every stored row.
++      expect(AppLanguage.bangla.languageCode, 'bn');
++      expect(AppLanguage.english.languageCode, 'en');
++    });
++
++    test('an unrecognised stored code reads as no choice', () {
++      expect(AppLanguage.forCode('xx'), isNull);
++      expect(AppLanguage.forCode(''), isNull);
++      expect(AppLanguage.forCode(null), isNull);
++    });
++
++    test('a locale in no shipped language falls back to Bangla', () {
++      expect(AppLanguage.forLocale(const Locale('ar')), AppLanguage.bangla);
++    });
++
++    test('supportedLocales matches what gen-l10n produced, in order', () {
++      // Bangla first, because `supportedLocales.first` is what Flutter's own
++      // resolution falls back to. Compared against the generated list so that
++      // adding an ARB file without revisiting the default fails here.
++      expect(supportedLocales, AppLocalizations.supportedLocales);
++      expect(supportedLocales.first, const Locale('bn'));
++    });
++  });
++
++  group('LocaleController', () {
++    test('loads the stored choice over the device locale', () async {
++      final controller = await LocaleController.load(
++        store: EphemeralLanguageStore(AppLanguage.english),
++        deviceLocales: const [Locale('bn')],
++      );
++
++      expect(controller.language, AppLanguage.english);
++      expect(controller.locale, const Locale('en'));
++    });
++
++    test('falls back to the device locale when nothing is stored', () async {
++      final controller = await LocaleController.load(
++        store: EphemeralLanguageStore(),
++        deviceLocales: const [Locale('ar')],
++      );
++
++      expect(controller.language, AppLanguage.bangla);
++    });
++
++    test('a store that cannot be read does not stop startup', () async {
++      // The settings row lives in the database. A read failure is not
++      // something the reader can act on, and refusing to start over it would
++      // be a worse outcome than showing the default language.
++      final controller = await LocaleController.load(
++        store: _FailingLanguageStore(),
++        deviceLocales: const [Locale('en')],
++      );
++
++      expect(controller.language, AppLanguage.english);
++    });
++
++    test('switching notifies listeners once', () async {
++      final controller = LocaleController(
++        language: AppLanguage.bangla,
++        store: EphemeralLanguageStore(),
++      );
++      addTearDown(controller.dispose);
++      var notifications = 0;
++      controller.addListener(() => notifications++);
++
++      await controller.setLanguage(AppLanguage.english);
++
++      expect(controller.language, AppLanguage.english);
++      expect(notifications, 1);
++    });
++
++    test(
++      'switching to the language already in force notifies nobody',
++      () async {
++        final controller = LocaleController(language: AppLanguage.bangla);
++        addTearDown(controller.dispose);
++        var notifications = 0;
++        controller.addListener(() => notifications++);
++
++        await controller.setLanguage(AppLanguage.bangla);
++
++        expect(notifications, 0);
++      },
++    );
++
++    test('a failed write still switches, and says the write failed', () async {
++      // The correct degradation: the language changes on screen and the
++      // caller is told it will not survive a relaunch. Not a crash, and not a
++      // silent success either.
++      final controller = LocaleController(
++        language: AppLanguage.bangla,
++        store: _FailingLanguageStore(),
++      );
++      addTearDown(controller.dispose);
++
++      final result = await controller.setLanguage(AppLanguage.english);
++
++      expect(controller.language, AppLanguage.english);
++      expect(result, const Failure<void, AppFailure>(StorageFailure()));
++    });
++  });
++
++  group('the choice survives a relaunch', () {
++    // The whole reason the setting lives in the encrypted database rather than
++    // in a preferences package. Driven against a real drift database so the
++    // settings table, the companion and the upsert are all exercised.
++
++    late AppDatabase database;
++
++    setUp(() {
++      database = AppDatabase(NativeDatabase.memory());
++    });
++
++    tearDown(() => database.close());
++
++    test('a choice written in one session is read back in the next', () async {
++      final first = await LocaleController.load(
++        store: DatabaseLanguageStore(database),
++        deviceLocales: const [Locale('bn')],
++      );
++      expect(first.language, AppLanguage.bangla);
++
++      expect(
++        await first.setLanguage(AppLanguage.english),
++        const Success<void, AppFailure>(null),
++      );
++
++      // A second controller over the same database is what a relaunch looks
++      // like: nothing carried over in memory, everything read from the row.
++      final second = await LocaleController.load(
++        store: DatabaseLanguageStore(database),
++        deviceLocales: const [Locale('bn')],
++      );
++
++      expect(second.language, AppLanguage.english);
++    });
++
++    test('switching twice leaves one row, not two', () async {
++      final store = DatabaseLanguageStore(database);
++      await store.write(AppLanguage.english);
++      await store.write(AppLanguage.bangla);
++
++      final rows = await database.select(database.appSettings).get();
++
++      expect(rows, hasLength(1));
++      expect(rows.single.name, settingLanguage);
++      expect(rows.single.value, 'bn');
++    });
++
++    test('a corrupt value reads as no choice rather than throwing', () async {
++      // A row a future version wrote, or one that got mangled. The device
++      // locale answers instead; nothing throws.
++      await database.writeSetting(settingLanguage, 'klingon');
++
++      final controller = await LocaleController.load(
++        store: DatabaseLanguageStore(database),
++        deviceLocales: const [Locale('en')],
++      );
++
++      expect(controller.language, AppLanguage.english);
++    });
++
++    test('a read on a closed database degrades instead of throwing', () async {
++      // Storage failing is not a reason to take the app down over a display
++      // setting. The store answers with a `Failure`, and `LocaleController`
++      // treats that as "no choice recorded".
++      final store = DatabaseLanguageStore(database);
++      await store.write(AppLanguage.english);
++      await database.close();
++
++      expect((await store.read()).isFailure, isTrue);
++      expect((await store.write(AppLanguage.bangla)).isFailure, isTrue);
++
++      final controller = await LocaleController.load(
++        store: store,
++        deviceLocales: const [Locale('ar')],
++      );
++      expect(controller.language, AppLanguage.bangla);
++    });
++  });
++}
+diff --git a/jotno/test/core/l10n/localised_surfaces_test.dart b/jotno/test/core/l10n/localised_surfaces_test.dart
+new file mode 100644
+index 0000000..91e679b
+--- /dev/null
++++ b/jotno/test/core/l10n/localised_surfaces_test.dart
+@@ -0,0 +1,255 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:drift/native.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/database/app_database.dart';
++import 'package:jotno/core/l10n/failure_messages.dart';
++import 'package:jotno/core/l10n/locale_controller.dart';
++import 'package:jotno/core/result/app_failure.dart';
++import 'package:jotno/l10n/app_localizations_bn.dart';
++import 'package:jotno/l10n/app_localizations_en.dart';
++import 'package:jotno/main.dart';
++
++/// Every `Text` the tree currently renders, joined.
++String _renderedText(WidgetTester tester) => tester
++    .widgetList<Text>(find.byType(Text))
++    .map((text) => text.data ?? '')
++    .join('\n');
++
++Map<String, Object?> _arb(String name) =>
++    (jsonDecode(File('lib/l10n/$name').readAsStringSync()) as Map)
++        .cast<String, Object?>();
++
++void main() {
++  final bn = AppLocalizationsBn();
++  final en = AppLocalizationsEn();
++
++  group('the startup error surface localises without the database', () {
++    // The case the whole design turns on. This surface renders precisely when
++    // the database will not open, so there is no stored choice to read — it
++    // resolves from the device locale, and it must not itself throw.
++
++    testWidgets('an Arabic device sees Bangla, not English', (tester) async {
++      await tester.pumpWidget(
++        const DatabaseUnavailableApp(
++          reason: StartupFailure.missingCipher,
++          deviceLocales: [Locale('ar')],
++        ),
++      );
++
++      expect(find.text(bn.startupFailureTitle), findsOneWidget);
++      expect(find.text(bn.startupFailureMissingCipher), findsOneWidget);
++    });
++
++    testWidgets('an English device sees English', (tester) async {
++      await tester.pumpWidget(
++        const DatabaseUnavailableApp(
++          reason: StartupFailure.missingCipher,
++          deviceLocales: [Locale('en', 'US')],
++        ),
++      );
++
++      expect(find.text(en.startupFailureTitle), findsOneWidget);
++      expect(find.text(en.startupFailureMissingCipher), findsOneWidget);
++    });
++
++    testWidgets('every reason renders in Bangla without throwing', (
++      tester,
++    ) async {
++      for (final reason in StartupFailure.values) {
++        await tester.pumpWidget(
++          DatabaseUnavailableApp(
++            reason: reason,
++            deviceLocales: const [Locale('bn')],
++          ),
++        );
++        await tester.pumpAndSettle();
++
++        expect(tester.takeException(), isNull, reason: '$reason');
++
++        final texts = _renderedText(tester);
++        expect(texts, contains(bn.startupFailureTitle));
++        expect(texts, contains(reason.explain(bn)));
++        // Still true after localisation: nothing derived from an exception
++        // reaches this screen.
++        expect(texts, isNot(contains('SqliteException')));
++        expect(texts, isNot(contains('pragma')));
++      }
++    });
++
++    testWidgets('no reason renders an empty message, in either language', (
++      tester,
++    ) async {
++      for (final reason in StartupFailure.values) {
++        expect(reason.explain(bn).trim(), isNotEmpty, reason: '$reason bn');
++        expect(reason.explain(en).trim(), isNotEmpty, reason: '$reason en');
++        expect(
++          reason.explain(bn),
++          isNot(reason.explain(en)),
++          reason: '$reason was never translated',
++        );
++      }
++    });
++
++    testWidgets('the surface falls back when there are no localisations', (
++      tester,
++    ) async {
++      // A failure early enough that the delegates have not loaded still has to
++      // render something. `explain(null)` is that path.
++      for (final reason in StartupFailure.values) {
++        expect(reason.explain(null), reason.explanation);
++      }
++    });
++
++    testWidgets('a long message wraps rather than truncating', (tester) async {
++      // Truncation on this surface would eat the sentence saying what to do
++      // about the failure, and on later screens it would eat a medication
++      // name. The rule is the same rule.
++      await tester.pumpWidget(
++        const DatabaseUnavailableApp(
++          reason: StartupFailure.missingCipher,
++          deviceLocales: [Locale('bn')],
++        ),
++      );
++
++      final message = tester.widget<Text>(
++        find.text(bn.startupFailureMissingCipher),
++      );
++      expect(
++        message.overflow ?? TextOverflow.clip,
++        isNot(TextOverflow.ellipsis),
++      );
++      expect(message.maxLines, isNull);
++    });
++  });
++
++  group('the English ARB and the no-localisations fallback agree', () {
++    // Two copies of the same sentence exist on purpose: the ARB one, and the
++    // fixed constant the surface renders when nothing is loaded. They must say
++    // the same thing, or a user on a broken build reads a message that was
++    // edited once and not twice.
++    test('every startup reason', () {
++      for (final reason in StartupFailure.values) {
++        expect(reason.explain(en), reason.explanation, reason: '$reason');
++      }
++    });
++
++    test('the title', () {
++      expect(en.startupFailureTitle, startupFailureFallbackTitle);
++    });
++  });
++
++  group('the eleven live keys are all present in both ARB files', () {
++    // The keys the error model and the startup surface name. A key that no
++    // longer resolves is a blank message on a screen nobody tests in that
++    // language, so the hierarchy is walked rather than trusted.
++    final bnKeys = _arb('app_bn.arb').keys.toSet();
++    final enKeys = _arb('app_en.arb').keys.toSet();
++
++    test('the five AppFailure keys', () {
++      for (final failure in appFailureVariants) {
++        expect(bnKeys, contains(failure.localisationKey));
++        expect(enKeys, contains(failure.localisationKey));
++      }
++      expect(appFailureVariants, hasLength(5));
++    });
++
++    test('the six StartupFailure keys', () {
++      for (final reason in StartupFailure.values) {
++        expect(bnKeys, contains(reason.localisationKey));
++        expect(enKeys, contains(reason.localisationKey));
++      }
++      expect(StartupFailure.values, hasLength(6));
++    });
++
++    test('every AppFailure variant resolves to a distinct message', () {
++      final messages = appFailureVariants
++          .map((failure) => failure.message(bn))
++          .toList();
++
++      expect(messages.toSet(), hasLength(messages.length));
++      for (final message in messages) {
++        expect(message.trim(), isNotEmpty);
++      }
++    });
++
++    test('an AppFailure message never carries its error type', () {
++      // `UnexpectedFailure` records a `Type` for diagnostics. It is not
++      // something to show a reader, and interpolating it here would be the
++      // first crack in the no-free-text rule.
++      const failure = UnexpectedFailure(errorType: StateError);
++      expect(failure.message(en), isNot(contains('StateError')));
++      expect(failure.message(en), en.failureUnexpected);
++    });
++  });
++
++  group('the app surface', () {
++    late AppDatabase database;
++
++    setUp(() {
++      database = AppDatabase(NativeDatabase.memory());
++    });
++
++    tearDown(() => database.close());
++
++    testWidgets('renders Bangla with Bengali numerals by default', (
++      tester,
++    ) async {
++      final controller = LocaleController(language: AppLanguage.bangla);
++      addTearDown(controller.dispose);
++
++      await tester.pumpWidget(
++        JotnoApp(database: database, localeController: controller),
++      );
++      await tester.pumpAndSettle();
++
++      // The schema version is the only number this screen shows, and it goes
++      // through the shared formatter. `2`, not `২`, would mean a widget
++      // called `toString()` on it.
++      expect(find.text(bn.databaseReady('২')), findsOneWidget);
++      expect(_renderedText(tester), isNot(contains('2')));
++    });
++
++    testWidgets('switching language updates every string without a restart', (
++      tester,
++    ) async {
++      // The acceptance criterion. No `pumpWidget` between the switch and the
++      // assertion: the tree is the same tree, rebuilt.
++      final controller = LocaleController(
++        language: AppLanguage.bangla,
++        store: EphemeralLanguageStore(),
++      );
++      addTearDown(controller.dispose);
++
++      await tester.pumpWidget(
++        JotnoApp(database: database, localeController: controller),
++      );
++      await tester.pumpAndSettle();
++      expect(find.text(bn.databaseReady('২')), findsOneWidget);
++
++      await controller.setLanguage(AppLanguage.english);
++      await tester.pumpAndSettle();
++
++      expect(find.text(en.databaseReady('2')), findsOneWidget);
++      expect(find.text(bn.databaseReady('২')), findsNothing);
++    });
++
++    testWidgets('the numeric run sets tabular figures', (tester) async {
++      final controller = LocaleController(language: AppLanguage.bangla);
++      addTearDown(controller.dispose);
++
++      await tester.pumpWidget(
++        JotnoApp(database: database, localeController: controller),
++      );
++      await tester.pumpAndSettle();
++
++      final text = tester.widget<Text>(find.text(bn.databaseReady('২')));
++      expect(
++        text.style?.fontFeatures?.map((feature) => feature.feature),
++        contains('tnum'),
++      );
++    });
++  });
++}
+diff --git a/jotno/test/core/l10n/number_format_test.dart b/jotno/test/core/l10n/number_format_test.dart
+new file mode 100644
+index 0000000..33e1b92
+--- /dev/null
++++ b/jotno/test/core/l10n/number_format_test.dart
+@@ -0,0 +1,114 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/l10n/locale_controller.dart';
++import 'package:jotno/core/l10n/number_format.dart';
++import 'package:jotno/l10n/app_localizations.dart';
++
++void main() {
++  final bangla = AppNumberFormat.forLanguage(AppLanguage.bangla);
++  final english = AppNumberFormat.forLanguage(AppLanguage.english);
++
++  group('Bengali numerals', () {
++    test('the matrix case: 124 renders as ১২৪', () {
++      expect(bangla.integer(124), '১২৪');
++    });
++
++    test('every digit maps', () {
++      for (final (index, digit) in '০১২৩৪৫৬৭৮৯'.split('').indexed) {
++        expect(bangla.integer(index), digit, reason: 'digit $index');
++      }
++    });
++
++    test('zero is ০, not an empty string', () {
++      expect(bangla.integer(0), '০');
++    });
++
++    test('a negative number keeps its sign', () {
++      expect(bangla.integer(-7), contains('৭'));
++      expect(bangla.integer(-7), isNot(contains('7')));
++    });
++
++    test('no Latin digit survives, at any magnitude', () {
++      // The rule is absolute: a screen that shows ১২৪ in one row and 124 in
++      // the next is an English product with a translation applied.
++      final latin = RegExp(r'[0-9]');
++      for (final value in <int>[0, 9, 10, 99, 1000, 100000, 12345678]) {
++        expect(
++          latin.hasMatch(bangla.integer(value)),
++          isFalse,
++          reason: '$value',
++        );
++      }
++    });
++  });
++
++  group('grouping and decimals', () {
++    test('Bangla groups in the Indian style, not in thousands', () {
++      // 1,23,456 — thousand, then lakh. This is why the formatter wraps
++      // `intl` rather than substituting digits into an English-grouped
++      // string: the separators land in different places.
++      expect(bangla.integer(123456), '১,২৩,৪৫৬');
++      expect(english.integer(123456), '123,456');
++    });
++
++    test('decimals render with exactly the digits asked for', () {
++      expect(bangla.decimal(36.5), '৩৬.৫');
++      expect(bangla.decimal(37), '৩৭.০');
++      expect(english.decimal(36.5), '36.5');
++    });
++
++    test('a two-digit fraction is available for the cases that need it', () {
++      expect(english.decimal(1.005, fractionDigits: 2), '1.00');
++      expect(bangla.decimal(2.5, fractionDigits: 2), '২.৫০');
++    });
++  });
++
++  group('English is the ordinary case', () {
++    test('124 stays 124', () {
++      expect(english.integer(124), '124');
++    });
++  });
++
++  group('choosing a formatter', () {
++    test('an unshipped locale gets Bangla, matching resolveLanguage', () {
++      expect(AppNumberFormat.of(const Locale('ar')).integer(5), '৫');
++    });
++
++    test('a regional English variant gets English', () {
++      expect(AppNumberFormat.of(const Locale('en', 'GB')).integer(5), '5');
++    });
++
++    testWidgets('context.numbers follows the locale in force', (tester) async {
++      late String rendered;
++
++      Future<void> pumpIn(Locale locale) async {
++        await tester.pumpWidget(
++          MaterialApp(
++            locale: locale,
++            localizationsDelegates: AppLocalizations.localizationsDelegates,
++            supportedLocales: supportedLocales,
++            home: Builder(
++              builder: (context) {
++                rendered = context.numbers.integer(124);
++                return const SizedBox.shrink();
++              },
++            ),
++          ),
++        );
++      }
++
++      await pumpIn(const Locale('bn'));
++      expect(rendered, '১২৪');
++
++      await pumpIn(const Locale('en'));
++      expect(rendered, '124');
++    });
++  });
++
++  group('tabular figures', () {
++    test('the shared feature list is what numeric styles must use', () {
++      expect(tabularFigures.single.feature, 'tnum');
++      expect(tabularFigures.single.value, 1);
++    });
++  });
++}
+diff --git a/jotno/test/core/l10n/text_metrics_test.dart b/jotno/test/core/l10n/text_metrics_test.dart
+new file mode 100644
+index 0000000..67631a5
+--- /dev/null
++++ b/jotno/test/core/l10n/text_metrics_test.dart
+@@ -0,0 +1,106 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jotno/core/l10n/locale_controller.dart';
++import 'package:jotno/core/l10n/text_metrics.dart';
++
++void main() {
++  group('the line-height rule', () {
++    test('body is 15/26 in Bangla and 15/24 in English', () {
++      expect(bodyFontSize, 15);
++      expect(bodyLineHeightFor(AppLanguage.bangla), 26);
++      expect(bodyLineHeightFor(AppLanguage.english), 24);
++    });
++
++    test('the style expresses the height as a ratio of the font size', () {
++      // `TextStyle.height` is a multiple, so 26/15 is what Flutter needs to
++      // be told to produce a 26px line box at 15px type.
++      expect(bodyTextStyle(AppLanguage.bangla).fontSize, 15);
++      expect(bodyTextStyle(AppLanguage.bangla).height, 26 / 15);
++      expect(bodyTextStyle(AppLanguage.english).height, 24 / 15);
++    });
++
++    test('Bangla is the taller of the two', () {
++      // If this ever inverts, every container sized to the Bangla measure is
++      // suddenly sized to the shorter one, and the English build is the one
++      // laid out correctly.
++      expect(
++        bodyLineHeightFor(AppLanguage.bangla),
++        greaterThan(bodyLineHeightFor(AppLanguage.english)),
++      );
++    });
++
++    test('the container measure is the Bangla one, in both languages', () {
++      expect(banglaBodyMeasure(1), 26);
++      expect(banglaBodyMeasure(3), 78);
++    });
++
++    test('the body text theme carries the height at every body size', () {
++      final theme = bodyTextTheme(AppLanguage.bangla);
++
++      for (final style in [
++        theme.bodyLarge,
++        theme.bodyMedium,
++        theme.bodySmall,
++      ]) {
++        expect(style?.height, 26 / 15);
++      }
++    });
++  });
++
++  group('a language switch does not reflow', () {
++    testWidgets('a container sized to the Bangla measure holds both', (
++      tester,
++    ) async {
++      // The rule that matters more than the numbers. Bangla text is taller;
++      // reserving the Bangla measure means the English build is slightly
++      // generous rather than the Bangla build being clipped.
++      Future<Size> measure(AppLanguage language, String text) async {
++        await tester.pumpWidget(
++          MaterialApp(
++            locale: language.locale,
++            home: Center(
++              child: SizedBox(
++                width: 200,
++                height: banglaBodyMeasure(1),
++                child: Text(text, style: bodyTextStyle(language)),
++              ),
++            ),
++          ),
++        );
++        return tester.getSize(find.byType(SizedBox));
++      }
++
++      final banglaSize = await measure(AppLanguage.bangla, 'যত্ন');
++      final englishSize = await measure(AppLanguage.english, 'Jotno');
++
++      expect(banglaSize, englishSize);
++      expect(banglaSize.height, banglaBodyLineHeight);
++    });
++
++    testWidgets('unconstrained Bangla body text is the taller line', (
++      tester,
++    ) async {
++      Future<double> heightOf(AppLanguage language) async {
++        await tester.pumpWidget(
++          MaterialApp(
++            locale: language.locale,
++            home: Center(
++              child: SizedBox(
++                width: 300,
++                child: Text('Jotno', style: bodyTextStyle(language)),
++              ),
++            ),
++          ),
++        );
++        return tester.getSize(find.text('Jotno')).height;
++      }
++
++      // Same string in both, so only the metrics differ. This is the reason
++      // the container above has to be told a size rather than shrink-wrapping.
++      expect(
++        await heightOf(AppLanguage.bangla),
++        greaterThan(await heightOf(AppLanguage.english)),
++      );
++    });
++  });
++}
+diff --git a/jotno/test/migration/app_database/generated/schema.dart b/jotno/test/migration/app_database/generated/schema.dart
+new file mode 100644
+index 0000000..1d8076f
+--- /dev/null
++++ b/jotno/test/migration/app_database/generated/schema.dart
+@@ -0,0 +1,25 @@
++// dart format width=80
++// GENERATED BY drift_dev, DO NOT MODIFY.
++// ignore_for_file: type=lint,unused_import
++//
++import 'package:drift/drift.dart';
++import 'package:drift/internal/migrations.dart';
++
++import 'schema_v1.dart' as v1;
++import 'schema_v2.dart' as v2;
++
++class GeneratedHelper implements SchemaInstantiationHelper {
++  @override
++  GeneratedDatabase databaseForVersion(QueryExecutor db, int version) {
++    switch (version) {
++      case 1:
++        return v1.DatabaseAtV1(db);
++      case 2:
++        return v2.DatabaseAtV2(db);
++      default:
++        throw MissingSchemaException(version, versions);
++    }
++  }
++
++  static const versions = const [1, 2];
++}
+diff --git a/jotno/test/migration/app_database/generated/schema_v1.dart b/jotno/test/migration/app_database/generated/schema_v1.dart
+new file mode 100644
+index 0000000..0c33468
+--- /dev/null
++++ b/jotno/test/migration/app_database/generated/schema_v1.dart
+@@ -0,0 +1,332 @@
++// dart format width=80
++// GENERATED BY drift_dev, DO NOT MODIFY.
++// ignore_for_file: type=lint,unused_import
++//
++import 'package:drift/drift.dart';
++
++class SmokeRecords extends Table
++    with TableInfo<SmokeRecords, SmokeRecordsData> {
++  @override
++  final GeneratedDatabase attachedDatabase;
++  final String? _alias;
++  SmokeRecords(this.attachedDatabase, [this._alias]);
++  late final GeneratedColumn<String> id = GeneratedColumn<String>(
++    'id',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
++    'created_at',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
++    'updated_at',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> deletedAt = GeneratedColumn<String>(
++    'deleted_at',
++    aliasedName,
++    true,
++    type: DriftSqlType.string,
++    requiredDuringInsert: false,
++    $customConstraints: 'NULL',
++  );
++  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
++    'device_id',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  @override
++  List<GeneratedColumn> get $columns => [
++    id,
++    createdAt,
++    updatedAt,
++    deletedAt,
++    deviceId,
++  ];
++  @override
++  String get aliasedName => _alias ?? actualTableName;
++  @override
++  String get actualTableName => $name;
++  static const String $name = 'smoke_records';
++  @override
++  Set<GeneratedColumn> get $primaryKey => {id};
++  @override
++  SmokeRecordsData map(Map<String, dynamic> data, {String? tablePrefix}) {
++    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
++    return SmokeRecordsData(
++      id: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}id'],
++      )!,
++      createdAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}created_at'],
++      )!,
++      updatedAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}updated_at'],
++      )!,
++      deletedAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}deleted_at'],
++      ),
++      deviceId: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}device_id'],
++      )!,
++    );
++  }
++
++  @override
++  SmokeRecords createAlias(String alias) {
++    return SmokeRecords(attachedDatabase, alias);
++  }
++
++  @override
++  List<String> get customConstraints => const ['PRIMARY KEY(id)'];
++  @override
++  bool get dontWriteConstraints => true;
++}
++
++class SmokeRecordsData extends DataClass
++    implements Insertable<SmokeRecordsData> {
++  final String id;
++  final String createdAt;
++  final String updatedAt;
++  final String? deletedAt;
++  final String deviceId;
++  const SmokeRecordsData({
++    required this.id,
++    required this.createdAt,
++    required this.updatedAt,
++    this.deletedAt,
++    required this.deviceId,
++  });
++  @override
++  Map<String, Expression> toColumns(bool nullToAbsent) {
++    final map = <String, Expression>{};
++    map['id'] = Variable<String>(id);
++    map['created_at'] = Variable<String>(createdAt);
++    map['updated_at'] = Variable<String>(updatedAt);
++    if (!nullToAbsent || deletedAt != null) {
++      map['deleted_at'] = Variable<String>(deletedAt);
++    }
++    map['device_id'] = Variable<String>(deviceId);
++    return map;
++  }
++
++  SmokeRecordsCompanion toCompanion(bool nullToAbsent) {
++    return SmokeRecordsCompanion(
++      id: Value(id),
++      createdAt: Value(createdAt),
++      updatedAt: Value(updatedAt),
++      deletedAt: deletedAt == null && nullToAbsent
++          ? const Value.absent()
++          : Value(deletedAt),
++      deviceId: Value(deviceId),
++    );
++  }
++
++  factory SmokeRecordsData.fromJson(
++    Map<String, dynamic> json, {
++    ValueSerializer? serializer,
++  }) {
++    serializer ??= driftRuntimeOptions.defaultSerializer;
++    return SmokeRecordsData(
++      id: serializer.fromJson<String>(json['id']),
++      createdAt: serializer.fromJson<String>(json['createdAt']),
++      updatedAt: serializer.fromJson<String>(json['updatedAt']),
++      deletedAt: serializer.fromJson<String?>(json['deletedAt']),
++      deviceId: serializer.fromJson<String>(json['deviceId']),
++    );
++  }
++  @override
++  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
++    serializer ??= driftRuntimeOptions.defaultSerializer;
++    return <String, dynamic>{
++      'id': serializer.toJson<String>(id),
++      'createdAt': serializer.toJson<String>(createdAt),
++      'updatedAt': serializer.toJson<String>(updatedAt),
++      'deletedAt': serializer.toJson<String?>(deletedAt),
++      'deviceId': serializer.toJson<String>(deviceId),
++    };
++  }
++
++  SmokeRecordsData copyWith({
++    String? id,
++    String? createdAt,
++    String? updatedAt,
++    Value<String?> deletedAt = const Value.absent(),
++    String? deviceId,
++  }) => SmokeRecordsData(
++    id: id ?? this.id,
++    createdAt: createdAt ?? this.createdAt,
++    updatedAt: updatedAt ?? this.updatedAt,
++    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
++    deviceId: deviceId ?? this.deviceId,
++  );
++  SmokeRecordsData copyWithCompanion(SmokeRecordsCompanion data) {
++    return SmokeRecordsData(
++      id: data.id.present ? data.id.value : this.id,
++      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
++      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
++      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
++      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
++    );
++  }
++
++  @override
++  String toString() {
++    return (StringBuffer('SmokeRecordsData(')
++          ..write('id: $id, ')
++          ..write('createdAt: $createdAt, ')
++          ..write('updatedAt: $updatedAt, ')
++          ..write('deletedAt: $deletedAt, ')
++          ..write('deviceId: $deviceId')
++          ..write(')'))
++        .toString();
++  }
++
++  @override
++  int get hashCode =>
++      Object.hash(id, createdAt, updatedAt, deletedAt, deviceId);
++  @override
++  bool operator ==(Object other) =>
++      identical(this, other) ||
++      (other is SmokeRecordsData &&
++          other.id == this.id &&
++          other.createdAt == this.createdAt &&
++          other.updatedAt == this.updatedAt &&
++          other.deletedAt == this.deletedAt &&
++          other.deviceId == this.deviceId);
++}
++
++class SmokeRecordsCompanion extends UpdateCompanion<SmokeRecordsData> {
++  final Value<String> id;
++  final Value<String> createdAt;
++  final Value<String> updatedAt;
++  final Value<String?> deletedAt;
++  final Value<String> deviceId;
++  final Value<int> rowid;
++  const SmokeRecordsCompanion({
++    this.id = const Value.absent(),
++    this.createdAt = const Value.absent(),
++    this.updatedAt = const Value.absent(),
++    this.deletedAt = const Value.absent(),
++    this.deviceId = const Value.absent(),
++    this.rowid = const Value.absent(),
++  });
++  SmokeRecordsCompanion.insert({
++    required String id,
++    required String createdAt,
++    required String updatedAt,
++    this.deletedAt = const Value.absent(),
++    required String deviceId,
++    this.rowid = const Value.absent(),
++  }) : id = Value(id),
++       createdAt = Value(createdAt),
++       updatedAt = Value(updatedAt),
++       deviceId = Value(deviceId);
++  static Insertable<SmokeRecordsData> custom({
++    Expression<String>? id,
++    Expression<String>? createdAt,
++    Expression<String>? updatedAt,
++    Expression<String>? deletedAt,
++    Expression<String>? deviceId,
++    Expression<int>? rowid,
++  }) {
++    return RawValuesInsertable({
++      if (id != null) 'id': id,
++      if (createdAt != null) 'created_at': createdAt,
++      if (updatedAt != null) 'updated_at': updatedAt,
++      if (deletedAt != null) 'deleted_at': deletedAt,
++      if (deviceId != null) 'device_id': deviceId,
++      if (rowid != null) 'rowid': rowid,
++    });
++  }
++
++  SmokeRecordsCompanion copyWith({
++    Value<String>? id,
++    Value<String>? createdAt,
++    Value<String>? updatedAt,
++    Value<String?>? deletedAt,
++    Value<String>? deviceId,
++    Value<int>? rowid,
++  }) {
++    return SmokeRecordsCompanion(
++      id: id ?? this.id,
++      createdAt: createdAt ?? this.createdAt,
++      updatedAt: updatedAt ?? this.updatedAt,
++      deletedAt: deletedAt ?? this.deletedAt,
++      deviceId: deviceId ?? this.deviceId,
++      rowid: rowid ?? this.rowid,
++    );
++  }
++
++  @override
++  Map<String, Expression> toColumns(bool nullToAbsent) {
++    final map = <String, Expression>{};
++    if (id.present) {
++      map['id'] = Variable<String>(id.value);
++    }
++    if (createdAt.present) {
++      map['created_at'] = Variable<String>(createdAt.value);
++    }
++    if (updatedAt.present) {
++      map['updated_at'] = Variable<String>(updatedAt.value);
++    }
++    if (deletedAt.present) {
++      map['deleted_at'] = Variable<String>(deletedAt.value);
++    }
++    if (deviceId.present) {
++      map['device_id'] = Variable<String>(deviceId.value);
++    }
++    if (rowid.present) {
++      map['rowid'] = Variable<int>(rowid.value);
++    }
++    return map;
++  }
++
++  @override
++  String toString() {
++    return (StringBuffer('SmokeRecordsCompanion(')
++          ..write('id: $id, ')
++          ..write('createdAt: $createdAt, ')
++          ..write('updatedAt: $updatedAt, ')
++          ..write('deletedAt: $deletedAt, ')
++          ..write('deviceId: $deviceId, ')
++          ..write('rowid: $rowid')
++          ..write(')'))
++        .toString();
++  }
++}
++
++class DatabaseAtV1 extends GeneratedDatabase {
++  DatabaseAtV1(QueryExecutor e) : super(e);
++  late final SmokeRecords smokeRecords = SmokeRecords(this);
++  @override
++  Iterable<TableInfo<Table, Object?>> get allTables =>
++      allSchemaEntities.whereType<TableInfo<Table, Object?>>();
++  @override
++  List<DatabaseSchemaEntity> get allSchemaEntities => [smokeRecords];
++  @override
++  int get schemaVersion => 1;
++  @override
++  DriftDatabaseOptions get options =>
++      const DriftDatabaseOptions(storeDateTimeAsText: true);
++}
+diff --git a/jotno/test/migration/app_database/generated/schema_v2.dart b/jotno/test/migration/app_database/generated/schema_v2.dart
+new file mode 100644
+index 0000000..2588f2b
+--- /dev/null
++++ b/jotno/test/migration/app_database/generated/schema_v2.dart
+@@ -0,0 +1,563 @@
++// dart format width=80
++// GENERATED BY drift_dev, DO NOT MODIFY.
++// ignore_for_file: type=lint,unused_import
++//
++import 'package:drift/drift.dart';
++
++class SmokeRecords extends Table
++    with TableInfo<SmokeRecords, SmokeRecordsData> {
++  @override
++  final GeneratedDatabase attachedDatabase;
++  final String? _alias;
++  SmokeRecords(this.attachedDatabase, [this._alias]);
++  late final GeneratedColumn<String> id = GeneratedColumn<String>(
++    'id',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
++    'created_at',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
++    'updated_at',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> deletedAt = GeneratedColumn<String>(
++    'deleted_at',
++    aliasedName,
++    true,
++    type: DriftSqlType.string,
++    requiredDuringInsert: false,
++    $customConstraints: 'NULL',
++  );
++  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
++    'device_id',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  @override
++  List<GeneratedColumn> get $columns => [
++    id,
++    createdAt,
++    updatedAt,
++    deletedAt,
++    deviceId,
++  ];
++  @override
++  String get aliasedName => _alias ?? actualTableName;
++  @override
++  String get actualTableName => $name;
++  static const String $name = 'smoke_records';
++  @override
++  Set<GeneratedColumn> get $primaryKey => {id};
++  @override
++  SmokeRecordsData map(Map<String, dynamic> data, {String? tablePrefix}) {
++    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
++    return SmokeRecordsData(
++      id: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}id'],
++      )!,
++      createdAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}created_at'],
++      )!,
++      updatedAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}updated_at'],
++      )!,
++      deletedAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}deleted_at'],
++      ),
++      deviceId: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}device_id'],
++      )!,
++    );
++  }
++
++  @override
++  SmokeRecords createAlias(String alias) {
++    return SmokeRecords(attachedDatabase, alias);
++  }
++
++  @override
++  List<String> get customConstraints => const ['PRIMARY KEY(id)'];
++  @override
++  bool get dontWriteConstraints => true;
++}
++
++class SmokeRecordsData extends DataClass
++    implements Insertable<SmokeRecordsData> {
++  final String id;
++  final String createdAt;
++  final String updatedAt;
++  final String? deletedAt;
++  final String deviceId;
++  const SmokeRecordsData({
++    required this.id,
++    required this.createdAt,
++    required this.updatedAt,
++    this.deletedAt,
++    required this.deviceId,
++  });
++  @override
++  Map<String, Expression> toColumns(bool nullToAbsent) {
++    final map = <String, Expression>{};
++    map['id'] = Variable<String>(id);
++    map['created_at'] = Variable<String>(createdAt);
++    map['updated_at'] = Variable<String>(updatedAt);
++    if (!nullToAbsent || deletedAt != null) {
++      map['deleted_at'] = Variable<String>(deletedAt);
++    }
++    map['device_id'] = Variable<String>(deviceId);
++    return map;
++  }
++
++  SmokeRecordsCompanion toCompanion(bool nullToAbsent) {
++    return SmokeRecordsCompanion(
++      id: Value(id),
++      createdAt: Value(createdAt),
++      updatedAt: Value(updatedAt),
++      deletedAt: deletedAt == null && nullToAbsent
++          ? const Value.absent()
++          : Value(deletedAt),
++      deviceId: Value(deviceId),
++    );
++  }
++
++  factory SmokeRecordsData.fromJson(
++    Map<String, dynamic> json, {
++    ValueSerializer? serializer,
++  }) {
++    serializer ??= driftRuntimeOptions.defaultSerializer;
++    return SmokeRecordsData(
++      id: serializer.fromJson<String>(json['id']),
++      createdAt: serializer.fromJson<String>(json['createdAt']),
++      updatedAt: serializer.fromJson<String>(json['updatedAt']),
++      deletedAt: serializer.fromJson<String?>(json['deletedAt']),
++      deviceId: serializer.fromJson<String>(json['deviceId']),
++    );
++  }
++  @override
++  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
++    serializer ??= driftRuntimeOptions.defaultSerializer;
++    return <String, dynamic>{
++      'id': serializer.toJson<String>(id),
++      'createdAt': serializer.toJson<String>(createdAt),
++      'updatedAt': serializer.toJson<String>(updatedAt),
++      'deletedAt': serializer.toJson<String?>(deletedAt),
++      'deviceId': serializer.toJson<String>(deviceId),
++    };
++  }
++
++  SmokeRecordsData copyWith({
++    String? id,
++    String? createdAt,
++    String? updatedAt,
++    Value<String?> deletedAt = const Value.absent(),
++    String? deviceId,
++  }) => SmokeRecordsData(
++    id: id ?? this.id,
++    createdAt: createdAt ?? this.createdAt,
++    updatedAt: updatedAt ?? this.updatedAt,
++    deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
++    deviceId: deviceId ?? this.deviceId,
++  );
++  SmokeRecordsData copyWithCompanion(SmokeRecordsCompanion data) {
++    return SmokeRecordsData(
++      id: data.id.present ? data.id.value : this.id,
++      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
++      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
++      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
++      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
++    );
++  }
++
++  @override
++  String toString() {
++    return (StringBuffer('SmokeRecordsData(')
++          ..write('id: $id, ')
++          ..write('createdAt: $createdAt, ')
++          ..write('updatedAt: $updatedAt, ')
++          ..write('deletedAt: $deletedAt, ')
++          ..write('deviceId: $deviceId')
++          ..write(')'))
++        .toString();
++  }
++
++  @override
++  int get hashCode =>
++      Object.hash(id, createdAt, updatedAt, deletedAt, deviceId);
++  @override
++  bool operator ==(Object other) =>
++      identical(this, other) ||
++      (other is SmokeRecordsData &&
++          other.id == this.id &&
++          other.createdAt == this.createdAt &&
++          other.updatedAt == this.updatedAt &&
++          other.deletedAt == this.deletedAt &&
++          other.deviceId == this.deviceId);
++}
++
++class SmokeRecordsCompanion extends UpdateCompanion<SmokeRecordsData> {
++  final Value<String> id;
++  final Value<String> createdAt;
++  final Value<String> updatedAt;
++  final Value<String?> deletedAt;
++  final Value<String> deviceId;
++  final Value<int> rowid;
++  const SmokeRecordsCompanion({
++    this.id = const Value.absent(),
++    this.createdAt = const Value.absent(),
++    this.updatedAt = const Value.absent(),
++    this.deletedAt = const Value.absent(),
++    this.deviceId = const Value.absent(),
++    this.rowid = const Value.absent(),
++  });
++  SmokeRecordsCompanion.insert({
++    required String id,
++    required String createdAt,
++    required String updatedAt,
++    this.deletedAt = const Value.absent(),
++    required String deviceId,
++    this.rowid = const Value.absent(),
++  }) : id = Value(id),
++       createdAt = Value(createdAt),
++       updatedAt = Value(updatedAt),
++       deviceId = Value(deviceId);
++  static Insertable<SmokeRecordsData> custom({
++    Expression<String>? id,
++    Expression<String>? createdAt,
++    Expression<String>? updatedAt,
++    Expression<String>? deletedAt,
++    Expression<String>? deviceId,
++    Expression<int>? rowid,
++  }) {
++    return RawValuesInsertable({
++      if (id != null) 'id': id,
++      if (createdAt != null) 'created_at': createdAt,
++      if (updatedAt != null) 'updated_at': updatedAt,
++      if (deletedAt != null) 'deleted_at': deletedAt,
++      if (deviceId != null) 'device_id': deviceId,
++      if (rowid != null) 'rowid': rowid,
++    });
++  }
++
++  SmokeRecordsCompanion copyWith({
++    Value<String>? id,
++    Value<String>? createdAt,
++    Value<String>? updatedAt,
++    Value<String?>? deletedAt,
++    Value<String>? deviceId,
++    Value<int>? rowid,
++  }) {
++    return SmokeRecordsCompanion(
++      id: id ?? this.id,
++      createdAt: createdAt ?? this.createdAt,
++      updatedAt: updatedAt ?? this.updatedAt,
++      deletedAt: deletedAt ?? this.deletedAt,
++      deviceId: deviceId ?? this.deviceId,
++      rowid: rowid ?? this.rowid,
++    );
++  }
++
++  @override
++  Map<String, Expression> toColumns(bool nullToAbsent) {
++    final map = <String, Expression>{};
++    if (id.present) {
++      map['id'] = Variable<String>(id.value);
++    }
++    if (createdAt.present) {
++      map['created_at'] = Variable<String>(createdAt.value);
++    }
++    if (updatedAt.present) {
++      map['updated_at'] = Variable<String>(updatedAt.value);
++    }
++    if (deletedAt.present) {
++      map['deleted_at'] = Variable<String>(deletedAt.value);
++    }
++    if (deviceId.present) {
++      map['device_id'] = Variable<String>(deviceId.value);
++    }
++    if (rowid.present) {
++      map['rowid'] = Variable<int>(rowid.value);
++    }
++    return map;
++  }
++
++  @override
++  String toString() {
++    return (StringBuffer('SmokeRecordsCompanion(')
++          ..write('id: $id, ')
++          ..write('createdAt: $createdAt, ')
++          ..write('updatedAt: $updatedAt, ')
++          ..write('deletedAt: $deletedAt, ')
++          ..write('deviceId: $deviceId, ')
++          ..write('rowid: $rowid')
++          ..write(')'))
++        .toString();
++  }
++}
++
++class AppSettings extends Table with TableInfo<AppSettings, AppSettingsData> {
++  @override
++  final GeneratedDatabase attachedDatabase;
++  final String? _alias;
++  AppSettings(this.attachedDatabase, [this._alias]);
++  late final GeneratedColumn<String> name = GeneratedColumn<String>(
++    'name',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> value = GeneratedColumn<String>(
++    'value',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
++    'updated_at',
++    aliasedName,
++    false,
++    type: DriftSqlType.string,
++    requiredDuringInsert: true,
++    $customConstraints: 'NOT NULL',
++  );
++  @override
++  List<GeneratedColumn> get $columns => [name, value, updatedAt];
++  @override
++  String get aliasedName => _alias ?? actualTableName;
++  @override
++  String get actualTableName => $name;
++  static const String $name = 'app_settings';
++  @override
++  Set<GeneratedColumn> get $primaryKey => {name};
++  @override
++  AppSettingsData map(Map<String, dynamic> data, {String? tablePrefix}) {
++    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
++    return AppSettingsData(
++      name: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}name'],
++      )!,
++      value: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}value'],
++      )!,
++      updatedAt: attachedDatabase.typeMapping.read(
++        DriftSqlType.string,
++        data['${effectivePrefix}updated_at'],
++      )!,
++    );
++  }
++
++  @override
++  AppSettings createAlias(String alias) {
++    return AppSettings(attachedDatabase, alias);
++  }
++
++  @override
++  List<String> get customConstraints => const ['PRIMARY KEY(name)'];
++  @override
++  bool get dontWriteConstraints => true;
++}
++
++class AppSettingsData extends DataClass implements Insertable<AppSettingsData> {
++  final String name;
++  final String value;
++  final String updatedAt;
++  const AppSettingsData({
++    required this.name,
++    required this.value,
++    required this.updatedAt,
++  });
++  @override
++  Map<String, Expression> toColumns(bool nullToAbsent) {
++    final map = <String, Expression>{};
++    map['name'] = Variable<String>(name);
++    map['value'] = Variable<String>(value);
++    map['updated_at'] = Variable<String>(updatedAt);
++    return map;
++  }
++
++  AppSettingsCompanion toCompanion(bool nullToAbsent) {
++    return AppSettingsCompanion(
++      name: Value(name),
++      value: Value(value),
++      updatedAt: Value(updatedAt),
++    );
++  }
++
++  factory AppSettingsData.fromJson(
++    Map<String, dynamic> json, {
++    ValueSerializer? serializer,
++  }) {
++    serializer ??= driftRuntimeOptions.defaultSerializer;
++    return AppSettingsData(
++      name: serializer.fromJson<String>(json['name']),
++      value: serializer.fromJson<String>(json['value']),
++      updatedAt: serializer.fromJson<String>(json['updatedAt']),
++    );
++  }
++  @override
++  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
++    serializer ??= driftRuntimeOptions.defaultSerializer;
++    return <String, dynamic>{
++      'name': serializer.toJson<String>(name),
++      'value': serializer.toJson<String>(value),
++      'updatedAt': serializer.toJson<String>(updatedAt),
++    };
++  }
++
++  AppSettingsData copyWith({String? name, String? value, String? updatedAt}) =>
++      AppSettingsData(
++        name: name ?? this.name,
++        value: value ?? this.value,
++        updatedAt: updatedAt ?? this.updatedAt,
++      );
++  AppSettingsData copyWithCompanion(AppSettingsCompanion data) {
++    return AppSettingsData(
++      name: data.name.present ? data.name.value : this.name,
++      value: data.value.present ? data.value.value : this.value,
++      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
++    );
++  }
++
++  @override
++  String toString() {
++    return (StringBuffer('AppSettingsData(')
++          ..write('name: $name, ')
++          ..write('value: $value, ')
++          ..write('updatedAt: $updatedAt')
++          ..write(')'))
++        .toString();
++  }
++
++  @override
++  int get hashCode => Object.hash(name, value, updatedAt);
++  @override
++  bool operator ==(Object other) =>
++      identical(this, other) ||
++      (other is AppSettingsData &&
++          other.name == this.name &&
++          other.value == this.value &&
++          other.updatedAt == this.updatedAt);
++}
++
++class AppSettingsCompanion extends UpdateCompanion<AppSettingsData> {
++  final Value<String> name;
++  final Value<String> value;
++  final Value<String> updatedAt;
++  final Value<int> rowid;
++  const AppSettingsCompanion({
++    this.name = const Value.absent(),
++    this.value = const Value.absent(),
++    this.updatedAt = const Value.absent(),
++    this.rowid = const Value.absent(),
++  });
++  AppSettingsCompanion.insert({
++    required String name,
++    required String value,
++    required String updatedAt,
++    this.rowid = const Value.absent(),
++  }) : name = Value(name),
++       value = Value(value),
++       updatedAt = Value(updatedAt);
++  static Insertable<AppSettingsData> custom({
++    Expression<String>? name,
++    Expression<String>? value,
++    Expression<String>? updatedAt,
++    Expression<int>? rowid,
++  }) {
++    return RawValuesInsertable({
++      if (name != null) 'name': name,
++      if (value != null) 'value': value,
++      if (updatedAt != null) 'updated_at': updatedAt,
++      if (rowid != null) 'rowid': rowid,
++    });
++  }
++
++  AppSettingsCompanion copyWith({
++    Value<String>? name,
++    Value<String>? value,
++    Value<String>? updatedAt,
++    Value<int>? rowid,
++  }) {
++    return AppSettingsCompanion(
++      name: name ?? this.name,
++      value: value ?? this.value,
++      updatedAt: updatedAt ?? this.updatedAt,
++      rowid: rowid ?? this.rowid,
++    );
++  }
++
++  @override
++  Map<String, Expression> toColumns(bool nullToAbsent) {
++    final map = <String, Expression>{};
++    if (name.present) {
++      map['name'] = Variable<String>(name.value);
++    }
++    if (value.present) {
++      map['value'] = Variable<String>(value.value);
++    }
++    if (updatedAt.present) {
++      map['updated_at'] = Variable<String>(updatedAt.value);
++    }
++    if (rowid.present) {
++      map['rowid'] = Variable<int>(rowid.value);
++    }
++    return map;
++  }
++
++  @override
++  String toString() {
++    return (StringBuffer('AppSettingsCompanion(')
++          ..write('name: $name, ')
++          ..write('value: $value, ')
++          ..write('updatedAt: $updatedAt, ')
++          ..write('rowid: $rowid')
++          ..write(')'))
++        .toString();
++  }
++}
++
++class DatabaseAtV2 extends GeneratedDatabase {
++  DatabaseAtV2(QueryExecutor e) : super(e);
++  late final SmokeRecords smokeRecords = SmokeRecords(this);
++  late final AppSettings appSettings = AppSettings(this);
++  @override
++  Iterable<TableInfo<Table, Object?>> get allTables =>
++      allSchemaEntities.whereType<TableInfo<Table, Object?>>();
++  @override
++  List<DatabaseSchemaEntity> get allSchemaEntities => [
++    smokeRecords,
++    appSettings,
++  ];
++  @override
++  int get schemaVersion => 2;
++  @override
++  DriftDatabaseOptions get options =>
++      const DriftDatabaseOptions(storeDateTimeAsText: true);
++}
+diff --git a/jotno/test/migration/app_database/migration_test.dart b/jotno/test/migration/app_database/migration_test.dart
+new file mode 100644
+index 0000000..23ba50f
+--- /dev/null
++++ b/jotno/test/migration/app_database/migration_test.dart
+@@ -0,0 +1,72 @@
++// dart format width=80
++// ignore_for_file: unused_local_variable, unused_import
++import 'package:drift/drift.dart';
++import 'package:drift_dev/api/migrations_native.dart';
++import 'package:jotno/core/database/app_database.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import 'generated/schema.dart';
++
++import 'generated/schema_v1.dart' as v1;
++import 'generated/schema_v2.dart' as v2;
++
++void main() {
++  driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
++  late SchemaVerifier verifier;
++
++  setUpAll(() {
++    verifier = SchemaVerifier(GeneratedHelper());
++  });
++
++  group('simple database migrations', () {
++    // These simple tests verify all possible schema updates with a simple (no
++    // data) migration. This is a quick way to ensure that written database
++    // migrations properly alter the schema.
++    const versions = GeneratedHelper.versions;
++    for (final (i, fromVersion) in versions.indexed) {
++      group('from $fromVersion', () {
++        for (final toVersion in versions.skip(i + 1)) {
++          test('to $toVersion', () async {
++            final schema = await verifier.schemaAt(fromVersion);
++            final db = AppDatabase(schema.newConnection());
++            await verifier.migrateAndValidate(db, toVersion);
++            await db.close();
++          });
++        }
++      });
++    }
++  });
++
++  // The following template shows how to write tests ensuring your migrations
++  // preserve existing data.
++  // Testing this can be useful for migrations that change existing columns
++  // (e.g. by alterating their type or constraints). Migrations that only add
++  // tables or columns typically don't need these advanced tests. For more
++  // information, see https://drift.simonbinder.eu/migrations/tests/#verifying-data-integrity
++  // TODO: This generated template shows how these tests could be written. Adopt
++  // it to your own needs when testing migrations with data integrity.
++  test('migration from v1 to v2 does not corrupt data', () async {
++    // Add data to insert into the old database, and the expected rows after the
++    // migration.
++    // TODO: Fill these lists
++    final oldSmokeRecordsData = <v1.SmokeRecordsData>[];
++    final expectedNewSmokeRecordsData = <v2.SmokeRecordsData>[];
++
++    await verifier.testWithDataIntegrity(
++      oldVersion: 1,
++      newVersion: 2,
++      createOld: v1.DatabaseAtV1.new,
++      createNew: v2.DatabaseAtV2.new,
++      openTestedDatabase: AppDatabase.new,
++      createItems: (batch, oldDb) {
++        batch.insertAll(oldDb.smokeRecords, oldSmokeRecordsData);
++      },
++      validateItems: (newDb) async {
++        expect(
++          expectedNewSmokeRecordsData,
++          await newDb.select(newDb.smokeRecords).get(),
++        );
++      },
++    );
++  });
++}
+diff --git a/jotno/tool/l10n_parity_gate.sh b/jotno/tool/l10n_parity_gate.sh
+new file mode 100755
+index 0000000..a198dea
+--- /dev/null
++++ b/jotno/tool/l10n_parity_gate.sh
+@@ -0,0 +1,118 @@
++#!/usr/bin/env bash
++#
++# The l10n parity gate: every key exists in every locale, or the build fails.
++#
++# Jotno is a Bangla-first product with English as a setting. A key that exists
++# in one ARB and not the other does not fail loudly at runtime — `gen-l10n`
++# fills the hole from the template, so a Bangla reader is quietly shown an
++# English sentence, or an English reader a Bangla one, on a screen nobody on
++# the team happens to open in that language. There is no crash, no log line
++# and no test failure. The only place that can be caught is here.
++#
++# It is a script rather than an inline CI step for the same two reasons
++# `no_print_gate.sh` is: a developer can run exactly what CI runs, and
++# `test/core/l10n/l10n_parity_gate_test.dart` can plant an unbalanced pair and
++# prove the gate fails on it, instead of assuming it would.
++#
++# Usage:
++#   tool/l10n_parity_gate.sh              # checks lib/l10n
++#   tool/l10n_parity_gate.sh <dir>        # checks the given directory
++set -euo pipefail
++
++arb_dir="${1:-lib/l10n}"
++
++# A missing directory would make the scan blind while still finding nothing to
++# complain about. Refuse — the same failure mode the other gates are written to
++# avoid.
++if [ ! -d "$arb_dir" ]; then
++  echo "::error::expected $arb_dir to exist; the l10n parity scan would be blind"
++  exit 1
++fi
++
++# grep exits 0 on a match, 1 on no match, and >=2 on an error. Only 1 means
++# "there are genuinely no ARB files"; >=2 is a broken scan and must not read as
++# a clean one.
++arb_files=$(find "$arb_dir" -maxdepth 1 -name 'app_*.arb' | sort) || {
++  echo "::error::could not list ARB files in $arb_dir"
++  exit 1
++}
++
++if [ -z "$arb_files" ]; then
++  echo "::error::no app_*.arb files in $arb_dir; the parity gate would pass on nothing"
++  exit 1
++fi
++
++file_count=$(printf '%s\n' "$arb_files" | wc -l | tr -d ' ')
++if [ "$file_count" -lt 2 ]; then
++  echo "::error::found only $file_count ARB file in $arb_dir; parity needs at least two locales"
++  printf '%s\n' "$arb_files"
++  exit 1
++fi
++
++# ARB is JSON, so it is parsed as JSON. A grep over `"key":` lines would also
++# match the nested fields inside an `@key` metadata block ("description",
++# "type", "example", every placeholder name) and would break the first time
++# somebody reformatted a file — a gate that is wrong about what a key is fails
++# the build for the wrong reason and gets switched off.
++#
++# python3 is already a CI dependency (ci.yaml parses pubspec.yaml with it) and
++# ships with macOS and every Linux runner. If it is absent, this exits non-zero
++# rather than skipping the check.
++python3 - "$arb_files" <<'PY'
++import json
++import sys
++from pathlib import Path
++
++paths = [Path(line) for line in sys.argv[1].splitlines() if line.strip()]
++
++# key -> set of locales that define it. `@key` entries are metadata (the
++# description, the placeholder types) and belong to the template only, so they
++# are not part of parity. `@@locale` and friends are directives.
++keys: dict[str, set[str]] = {}
++locales: list[str] = []
++failed = False
++
++for path in paths:
++    try:
++        with path.open(encoding='utf-8') as handle:
++            content = json.load(handle)
++    except json.JSONDecodeError as error:
++        print(f'{path}: not valid JSON — {error}')
++        failed = True
++        continue
++
++    locale = path.name
++    locales.append(locale)
++    for key in content:
++        if key.startswith('@'):
++            continue
++        keys.setdefault(key, set()).add(locale)
++
++if failed:
++    print('::error::an ARB file could not be parsed; parity is unknown')
++    sys.exit(1)
++
++missing = 0
++for key in sorted(keys):
++    for locale in locales:
++        if locale not in keys[key]:
++            present = ', '.join(sorted(keys[key]))
++            print(
++                f'{locale}: missing key "{key}" — it is defined in {present}. '
++                f'Add "{key}" to {locale} or remove it from {present}.'
++            )
++            missing += 1
++
++if missing:
++    print(
++        f'::error::the l10n parity gate failed on {missing} missing key(s); '
++        'every key must exist in every locale, because a key present in one '
++        'file only is silently served in the wrong language'
++    )
++    sys.exit(1)
++
++print(
++    f'l10n parity gate: clean — {len(keys)} key(s) present in all '
++    f'{len(locales)} locale(s) ({", ".join(sorted(locales))})'
++)
++PY
